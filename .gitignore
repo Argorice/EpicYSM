@@ -1,0 +1,44 @@
+# Build
+build/
+out/
+classes/
+bin/
+.gradle/
+run/
+run-server/
+runs/
+libs/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+.metadata
+eclipse/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local-only files: notes, jars for offline builds, publishing drafts
+# (local/ itself keeps its own .gitignore)
+local/*
+!local/.gitignore
+scratch/
+notes/
+*.bat
+!gradlew.bat
+*.ps1
+run.*
+dev.*
+publish.*
+javac.*.args
+
+# Model sources used for testing; only the small test model is tracked
+examples/*
+!examples/epicysm_test/

@@ -1,0 +1,99 @@
+plugins {
+    id 'java-library'
+    id 'idea'
+    id 'net.neoforged.moddev' version '2.0.134'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+repositories {
+    mavenLocal()
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'Modrinth'
+                url = 'https://api.modrinth.com/maven'
+            }
+        }
+        filter {
+            includeGroup 'maven.modrinth'
+        }
+    }
+}
+
+neoForge {
+    version = project.neo_version
+
+    parchment {
+        minecraftVersion = project.parchment_minecraft_version
+        mappingsVersion = project.parchment_mappings_version
+    }
+
+    runs {
+        client {
+            client()
+            gameDirectory = project.file('run')
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            gameDirectory = project.file('run-server')
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+// Epic Fight is required both to compile and to test in dev.
+// Primary source is the Modrinth maven; if a jar is present in local/libs,
+// it wins (offline fallback, or for testing unreleased builds).
+def localEpicFight = fileTree(dir: 'local/libs', include: 'epicfight*.jar')
+
+dependencies {
+    if (!localEpicFight.isEmpty()) {
+        implementation files(localEpicFight)
+    } else {
+        implementation "maven.modrinth:epic-fight:${epicfight_version}"
+    }
+}
+
+def replaceProperties = [
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_version            : mod_version,
+        mod_authors            : mod_authors,
+        mod_description        : mod_description,
+        mod_license            : mod_license,
+        minecraft_version_range: minecraft_version_range,
+        neo_version_range      : neo_version_range,
+        loader_version_range   : loader_version_range,
+        epicfight_version_range: epicfight_version_range,
+        ysm_version_range      : ysm_version_range
+]
+
+tasks.withType(ProcessResources).configureEach {
+    inputs.properties replaceProperties
+
+    filesMatching(['META-INF/neoforge.mods.toml']) {
+        expand replaceProperties
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
