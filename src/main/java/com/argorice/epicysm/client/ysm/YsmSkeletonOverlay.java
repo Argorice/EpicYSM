@@ -35,12 +35,40 @@ import yesman.epicfight.world.capabilities.entitypatch.LivingEntityPatch;
 
 import com.argorice.epicysm.EpicYsm;
 
-/** Puts Epic Fight's pose on the skeleton Yes Steve Model itself is drawing. */
+/**
+ * Puts Epic Fight's pose on the skeleton Yes Steve Model itself is drawing.
+ * One instance per player on screen: every player Yes Steve Model draws
+ * with an encrypted model gets his own skeleton found, measured and posed.
+ */
 public final class YsmSkeletonOverlay {
-    private static final YsmSkeletonOverlay INSTANCE = new YsmSkeletonOverlay();
+    private static final Map<UUID, YsmSkeletonOverlay> BY_PLAYER = new java.util.HashMap<>();
 
-    public static YsmSkeletonOverlay get() {
-        return INSTANCE;
+    /** The overlay posing this player's model. */
+    public static YsmSkeletonOverlay of(AbstractClientPlayer player) {
+        return BY_PLAYER.computeIfAbsent(player.getUUID(), id -> new YsmSkeletonOverlay());
+    }
+
+    /** Puts the player's skeleton back and forgets him. */
+    public static void forget(UUID player) {
+        YsmSkeletonOverlay overlay = BY_PLAYER.remove(player);
+
+        if (overlay != null) {
+            overlay.reset();
+        }
+    }
+
+    /** The same for every player. */
+    public static void resetAll() {
+        for (YsmSkeletonOverlay overlay : BY_PLAYER.values()) {
+            overlay.reset();
+        }
+
+        BY_PLAYER.clear();
+    }
+
+    /** Players with an overlay, for cleanup. */
+    public static Set<UUID> players() {
+        return new java.util.HashSet<>(BY_PLAYER.keySet());
     }
 
     private static final String YSM_PACKAGE = "com.elfmcys.";
@@ -403,6 +431,18 @@ public final class YsmSkeletonOverlay {
         return this.probePart;
     }
 
+    /**
+     * Model objects that were found, measured and never moved: copies Yes
+     * Steve Model keeps beside the one it animates. Passed over next time.
+     */
+    private final Set<Object> deadCopies = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+    private static final int MAX_DEAD_COPIES = 3;
+    @Nullable
+    private Object chosenModel;
+
+    /** Every copy was passed over and none was left: take what there is. */
+    private boolean keepDead;
+
     /** How many times the live skeleton has been looked for and not found. */
     private static final int MAX_SEARCHES = 8;
     private static final int SEARCH_EVERY = 10;
@@ -454,6 +494,7 @@ public final class YsmSkeletonOverlay {
         this.lastEuler.clear();
         this.lastSolvedEuler.clear();
         this.solver = null;
+        this.chosenModel = null;
         this.boneByName.clear();
         this.restByName.clear();
         this.mode = Mode.REST_ROTATION;
@@ -513,6 +554,8 @@ public final class YsmSkeletonOverlay {
             } else {
                 this.searches = 0;
                 this.sinceSearch = 0;
+                this.deadCopies.clear();
+                this.keepDead = false;
             }
 
             this.reset();
@@ -550,12 +593,23 @@ public final class YsmSkeletonOverlay {
     private void discover(AbstractClientPlayer player, Object renderer, ResourceLocation texture) {
         // Finding the live skeleton used to be done here, by walking out
         // from the texture Yes Steve Model was drawing with. It kept coming
-        YsmLiveSkeleton.Skeleton model = YsmLiveSkeleton.readFor(player, renderer, texture);
+        YsmLiveSkeleton.Skeleton model = YsmLiveSkeleton.readFor(player, renderer, texture, this.deadCopies);
         List<Object> live = model == null ? List.of() : model.objects();
+        this.chosenModel = model == null ? null : model.owner();
 
         // The model's size may have just been read alongside; the skeleton
         // about to be built must use it from its first frame.
         YsmPoseSolver.setModelScale(YsmRenderBridge.rulerFor(texture));
+
+        if (live.isEmpty() && !this.deadCopies.isEmpty()) {
+            // Every copy was passed over as still. Then still is what this
+            // model is; take the first one back.
+            EpicYsm.LOGGER.info("Skeleton overlay: no other copy of this model was found; keeping the one that did not move");
+            this.deadCopies.clear();
+            this.keepDead = true;
+            this.stage = Stage.IDLE;
+            return;
+        }
 
         if (live.isEmpty()) {
             // Not there yet is not the same as not there: on the first
@@ -565,7 +619,7 @@ public final class YsmSkeletonOverlay {
                 return;
             }
 
-            com.argorice.epicysm.client.Diag.info("Skeleton overlay: no skeleton found for the texture Yes Steve Model draws this"
+            EpicYsm.LOGGER.warn("Skeleton overlay: no skeleton found for the texture Yes Steve Model draws this"
                     + " player with after {} tries; its own animations are left alone", this.searches);
             this.stage = Stage.GIVEN_UP;
             return;
@@ -772,7 +826,7 @@ public final class YsmSkeletonOverlay {
         }
 
         if (byRole.size() < MIN_BONES) {
-            com.argorice.epicysm.client.Diag.info("Skeleton overlay: only {} humanoid bone(s) found among {} candidate(s);"
+            EpicYsm.LOGGER.warn("Skeleton overlay: only {} humanoid bone(s) found among {} candidate(s);"
                     + " too little to pose safely, leaving Yes Steve Model alone", byRole.size(), candidates);
             this.stage = Stage.GIVEN_UP;
             return;
@@ -868,7 +922,7 @@ public final class YsmSkeletonOverlay {
         Set<Class<?>> done = new HashSet<>();
 
         try {
-            for (String className : YsmClasses.names()) {
+            for (String className : YsmClasses.names(renderer)) {
                 try {
                     Class<?> type = Class.forName(className, false, loader);
 
@@ -1285,6 +1339,24 @@ public final class YsmSkeletonOverlay {
                 this.movedInGroup[0], this.movedInGroup[1], this.movedInGroup[2]);
         this.reportSlotRange();
 
+        // Nothing moved at all: most likely this is the copy Yes Steve
+        // Model keeps in its cache, not the one it animates for the player.
+        // Pass it over and look for another, a few times.
+        if (this.movedNumbers == 0 && !this.keepDead && this.chosenModel != null && this.deadCopies.size() < MAX_DEAD_COPIES) {
+            this.deadCopies.add(this.chosenModel);
+            EpicYsm.LOGGER.info("Skeleton overlay: the skeleton found never moved while the model was drawn ({} bone(s));"
+                    + " looking for another copy of it ({} passed over so far)", this.allBones.size(), this.deadCopies.size());
+            UUID owner = this.owner;
+            ResourceLocation subject = this.subject;
+            this.reset();
+            this.owner = owner;
+            this.subject = subject;
+            this.stage = Stage.IDLE;
+            this.searches = 0;
+            this.sinceSearch = 0;
+            return;
+        }
+
         // The parts reading is settled by the shape of the numbers, not by
         // catching them in motion: a model standing perfectly still still
         // says where its rotation lives.
@@ -1300,11 +1372,11 @@ public final class YsmSkeletonOverlay {
             this.keepOnlyTheLivingOnes();
             this.mode = Mode.REST_ROTATION;
             this.stage = Stage.ACTIVE;
-            com.argorice.epicysm.client.Diag.info("Skeleton overlay ACTIVE on the rest rotations: {} bone(s)", this.allBones.size());
+            EpicYsm.LOGGER.info("Skeleton overlay ACTIVE on the rest rotations: {} bone(s)", this.allBones.size());
             return;
         }
 
-        com.argorice.epicysm.client.Diag.info("Skeleton overlay: nothing Yes Steve Model exposes for this model changes while it is"
+        EpicYsm.LOGGER.warn("Skeleton overlay: nothing Yes Steve Model exposes for this model changes while it is"
                 + " drawn, so its pose is computed somewhere this mod cannot reach. Its own animations are kept.");
         this.stage = Stage.GIVEN_UP;
     }
@@ -1441,7 +1513,7 @@ public final class YsmSkeletonOverlay {
 
         this.mode = Mode.TRS;
         this.stage = Stage.ACTIVE;
-        com.argorice.epicysm.client.Diag.info("Skeleton overlay ACTIVE on the live rotations: {} body bone(s), written in radians"
+        EpicYsm.LOGGER.info("Skeleton overlay ACTIVE on the live rotations: {} body bone(s), written in radians"
                 + " beside the position and the scale Yes Steve Model computed. Epic Fight now poses this model.",
                 this.allBones.size());
         return true;
@@ -2524,7 +2596,7 @@ public final class YsmSkeletonOverlay {
         }
 
         if (rowMajor == 0 && columnMajor == 0) {
-            com.argorice.epicysm.client.Diag.info("Skeleton overlay: the twelve numbers per bone do move, but none of them sits where"
+            EpicYsm.LOGGER.warn("Skeleton overlay: the twelve numbers per bone do move, but none of them sits where"
                     + " a position would - they are not a transform this mod can write. Checked {} bone(s).{}",
                     usable, this.exampleSlot());
             this.stage = Stage.GIVEN_UP;
@@ -2536,7 +2608,7 @@ public final class YsmSkeletonOverlay {
         this.keepOnlyTheLivingOnes();
         this.mode = Mode.MATRIX;
         this.stage = Stage.ACTIVE;
-        com.argorice.epicysm.client.Diag.info("Skeleton overlay ACTIVE on the live transforms: {} body bone(s) + {} carried along,"
+        EpicYsm.LOGGER.info("Skeleton overlay ACTIVE on the live transforms: {} body bone(s) + {} carried along,"
                         + " {} layout ({} agreed, {} disagreed), sideways axis {}. Epic Fight now poses this model.",
                 this.allBones.size(), this.others.size(), this.rowMajorMatrix ? "row-major" : "column-major",
                 Math.max(rowMajor, columnMajor), Math.min(rowMajor, columnMajor),
@@ -2600,7 +2672,8 @@ public final class YsmSkeletonOverlay {
     /** Whether Epic Fight is actually in charge of this player right now. */
     /** The same question, for the bridge. */
     public static boolean fighting(AbstractClientPlayer player) {
-        return epicFightInCharge(player) && !get().dormant;
+        YsmSkeletonOverlay overlay = BY_PLAYER.get(player.getUUID());
+        return epicFightInCharge(player) && (overlay == null || !overlay.dormant);
     }
 
     private static boolean epicFightInCharge(AbstractClientPlayer player) {

@@ -104,7 +104,9 @@ motion (when physics is enabled in the settings).
 
 ## Known limits
 
-- Only your own player is drawn with the custom model; other players are shown with the
+- Other players are posed the same way, as long as this client sees their model: Yes Steve
+  Model shares model choices through the server, so it needs YSM installed there (Epic Fight
+  already requires that). Players whose model this client does not have are shown with the
   default Epic Fight body.
 - Epic Fight hides the off-hand item while a two-handed weapon is held. The mod follows the
   same rule on encrypted models, so a shield disappears with a greatsword.

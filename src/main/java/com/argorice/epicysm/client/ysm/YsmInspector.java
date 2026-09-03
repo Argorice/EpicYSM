@@ -349,7 +349,7 @@ public final class YsmInspector {
 
             ClassLoader loader = this.renderer.getClass().getClassLoader();
 
-            for (String className : YsmClasses.names()) {
+            for (String className : YsmClasses.names(this.renderer)) {
                 try {
                     this.pushStatics(Class.forName(className, false, loader), "static:" + shortName(className));
                 } catch (Throwable ignored) {

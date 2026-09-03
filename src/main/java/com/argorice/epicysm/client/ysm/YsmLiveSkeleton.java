@@ -85,6 +85,17 @@ public final class YsmLiveSkeleton {
     @Nullable
     public static Skeleton readFor(@Nullable AbstractClientPlayer player, Object renderer,
                                    @Nullable ResourceLocation texture) {
+        return readFor(player, renderer, texture, Set.of());
+    }
+
+    /**
+     * @param rejected model objects already tried and found not to be the
+     *                 one Yes Steve Model animates (a cached copy with the
+     *                 same bones); they are passed over
+     */
+    @Nullable
+    public static Skeleton readFor(@Nullable AbstractClientPlayer player, Object renderer,
+                                   @Nullable ResourceLocation texture, Set<Object> rejected) {
         try {
             Found found = walk(player, renderer, texture);
 
@@ -92,34 +103,73 @@ public final class YsmLiveSkeleton {
                 return null;
             }
 
+            // Yes Steve Model can hold the same model twice: the copy in its
+            // cache and the copy built for this player. Only the second is
+            // animated. The one that hangs below the object holding the
+            // player's texture (or the player himself) is preferred; a plain
+            // nearest-common-ancestor distance breaks ties after that.
+            List<Object> holders = new ArrayList<>(found.textureHolders);
+            holders.addAll(found.playerHolders);
             Skeleton best = null;
+            int bestBelow = Integer.MAX_VALUE;
             int bestDistance = Integer.MAX_VALUE;
             boolean bestIsOneRig = false;
+            int copies = 0;
 
-            for (Object holder : found.textureHolders) {
-                for (Skeleton skeleton : found.skeletons) {
-                    int distance = distance(found.parents, holder, skeleton.owner());
+            for (Skeleton skeleton : found.skeletons) {
+                if (rejected.contains(skeleton.owner())) {
+                    continue;
+                }
 
-                    if (distance < 0) {
-                        continue;
+                int below = Integer.MAX_VALUE;
+                int distance = Integer.MAX_VALUE;
+
+                for (Object holder : holders) {
+                    int down = stepsBelow(found.parents, holder, skeleton.owner());
+
+                    if (down >= 0 && down < below) {
+                        below = down;
                     }
 
-                    // A rig has one bone called LeftArm. Something that has
-                    // seven of them is not a model, it is every model Yes
-                    boolean oneRig = skeleton.repeats() == 0;
+                    int apart = distance(found.parents, holder, skeleton.owner());
 
-                    if (oneRig != bestIsOneRig ? oneRig : distance < bestDistance) {
-                        bestDistance = distance;
-                        bestIsOneRig = oneRig;
-                        best = skeleton;
+                    if (apart >= 0 && apart < distance) {
+                        distance = apart;
                     }
+                }
+
+                if (distance == Integer.MAX_VALUE) {
+                    continue;
+                }
+
+                copies++;
+
+                // A rig has one bone called LeftArm. Something that has
+                // seven of them is not a model, it is every model Yes
+                boolean oneRig = skeleton.repeats() == 0;
+                boolean better;
+
+                if (oneRig != bestIsOneRig) {
+                    better = oneRig;
+                } else if (below != bestBelow) {
+                    better = below < bestBelow;
+                } else {
+                    better = distance < bestDistance;
+                }
+
+                if (better) {
+                    bestBelow = below;
+                    bestDistance = distance;
+                    bestIsOneRig = oneRig;
+                    best = skeleton;
                 }
             }
 
             if (best != null) {
                 com.argorice.epicysm.client.Diag.info("Live skeleton chosen for this model: {} bone(s), {} repeated name(s),"
-                        + " {} step(s) from the object holding the texture", best.bones().size(),
-                        best.repeats(), bestDistance);
+                        + " {} step(s) from the object holding the texture, {} below it; {} candidate(s), {} passed over",
+                        best.bones().size(), best.repeats(), bestDistance,
+                        bestBelow == Integer.MAX_VALUE ? "not" : bestBelow, copies, rejected.size());
                 rememberSize(found, texture);
             }
 
@@ -135,6 +185,21 @@ public final class YsmLiveSkeleton {
         final List<Object> textureHolders = new ArrayList<>();
         final List<Object> playerHolders = new ArrayList<>();
         final Map<Object, Object> parents = new IdentityHashMap<>();
+    }
+
+    /** Steps down from an ancestor to a node, or -1 if it is not above it. */
+    private static int stepsBelow(Map<Object, Object> parents, Object above, Object node) {
+        Object at = node;
+
+        for (int step = 0; at != null && step <= MAX_DEPTH + 1; step++) {
+            if (at == above) {
+                return step;
+            }
+
+            at = parents.get(at);
+        }
+
+        return -1;
     }
 
     /** Steps between two nodes through their nearest common ancestor. */
@@ -168,7 +233,7 @@ public final class YsmLiveSkeleton {
         Map<Object, Integer> depths = new IdentityHashMap<>();
         Deque<Object> queue = new ArrayDeque<>();
         Found found = new Found();
-        Set<String> seenSignatures = new HashSet<>();
+        Set<Object> seenOwners = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
 
         for (Object seed : seeds(player, renderer)) {
             if (seed != null && depths.putIfAbsent(seed, 0) == null) {
@@ -211,9 +276,9 @@ public final class YsmLiveSkeleton {
 
             Skeleton skeleton = skeletonOf(value);
 
-            // The same model is reachable by several routes; its bone names
-            // in order are as good an identity as it has.
-            if (skeleton != null && seenSignatures.add(String.join(",", skeleton.names()))) {
+            // The same model object is reachable by several routes; a second
+            // object with the same bones is a second copy and is kept.
+            if (skeleton != null && seenOwners.add(skeleton.objects().isEmpty() ? skeleton.owner() : skeleton.objects().get(0))) {
                 found.skeletons.add(skeleton);
             }
         }
@@ -795,7 +860,7 @@ public final class YsmLiveSkeleton {
         Set<Class<?>> done = new HashSet<>();
 
         try {
-            for (String className : YsmClasses.names()) {
+            for (String className : YsmClasses.names(renderer)) {
                 try {
                     Class<?> type = Class.forName(className, false, loader);
 

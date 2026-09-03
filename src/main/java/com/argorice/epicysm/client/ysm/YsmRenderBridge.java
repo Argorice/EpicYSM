@@ -61,7 +61,7 @@ public final class YsmRenderBridge {
             return false;
         }
 
-        YsmSkeletonOverlay overlay = YsmSkeletonOverlay.get();
+        YsmSkeletonOverlay overlay = YsmSkeletonOverlay.of(player);
         boolean poseWanted = yieldingToYsm && com.argorice.epicysm.client.EpicYsmConfig.skeletonOverlay()
                 && overlay.wants(player, texture);
         boolean scaleWanted = false;
@@ -101,7 +101,7 @@ public final class YsmRenderBridge {
             EpicYsm.LOGGER.warn("Yes Steve Model refused to be re-rendered with Epic Fight's pose;"
                     + " leaving its rendering alone from now on", t);
             disabled = true;
-            YsmSkeletonOverlay.get().reset();
+            YsmSkeletonOverlay.resetAll();
             return true;
         } finally {
             inside = false;
@@ -153,10 +153,10 @@ public final class YsmRenderBridge {
             rendersWithoutWindow = 0;
         } else if (++rendersWithoutWindow > 60) {
             disabled = true;
-            com.argorice.epicysm.client.Diag.info("Skeleton overlay: Yes Steve Model draws this player without ever asking for a"
+            EpicYsm.LOGGER.warn("Skeleton overlay: Yes Steve Model draws this player without ever asking for a"
                     + " render buffer, so there is no moment to place Epic Fight's pose in. Its own animations"
                     + " are left alone.");
-            YsmSkeletonOverlay.get().reset();
+            YsmSkeletonOverlay.resetAll();
         }
 
         return true;
@@ -213,7 +213,7 @@ public final class YsmRenderBridge {
                 this.opened = true;
 
                 if (this.poseWanted) {
-                    YsmSkeletonOverlay.get().onDraw(this.player, this.partialTicks);
+                    YsmSkeletonOverlay.of(this.player).onDraw(this.player, this.partialTicks);
                 }
             }
 

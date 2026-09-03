@@ -533,7 +533,7 @@ public final class YsmGeometryProbe {
         Set<Class<?>> done = new HashSet<>();
 
         try {
-            for (String className : YsmClasses.names()) {
+            for (String className : YsmClasses.names(renderer)) {
                 try {
                     Class<?> type = Class.forName(className, false, loader);
 

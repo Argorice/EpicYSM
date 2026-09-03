@@ -114,7 +114,7 @@ public final class EpicFightItems {
             return false;
         }
 
-        Map<String, Matrix4f> drawn = YsmSkeletonOverlay.get().drawnJoints(player);
+        Map<String, Matrix4f> drawn = YsmSkeletonOverlay.of(player).drawnJoints(player);
 
         if (drawn.isEmpty()) {
             return false;

@@ -228,6 +228,12 @@ public final class ModelManager {
         }
 
         this.foreignRendererSeen.keySet().removeIf(uuid -> level.getPlayerByUUID(uuid) == null);
+
+        for (java.util.UUID uuid : com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.players()) {
+            if (level.getPlayerByUUID(uuid) == null) {
+                com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(uuid);
+            }
+        }
         this.foreignSignatures.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.unreadableAttempts.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.probedModels.keySet().retainAll(this.foreignRendererSeen.keySet());
@@ -273,7 +279,7 @@ public final class ModelManager {
 
         // Yes Steve Model builds the model afresh when it is selected, so
         // the bone objects found last time belong to the previous copy of
-        com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.get().reset();
+        com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(player.getUUID());
 
         // Primary signal: the pixels of the texture the foreign renderer
         // draws with, matched against the model textures on disk. This
@@ -578,7 +584,7 @@ public final class ModelManager {
         this.yielded.clear();
         this.textureMatcher.reset();
         com.argorice.epicysm.client.render.PhysicsAnimator.get().reset();
-        com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.get().reset();
+        com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.resetAll();
         this.diskBoneNames.clear();
         this.sources = null;
     }
