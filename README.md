@@ -16,7 +16,8 @@ animations exactly as before.
 
 - Minecraft 1.21.1, NeoForge
 - Requires Epic Fight 21.15+ and Yes Steve Model 2.6+
-- Client side only. Nothing to install on a server.
+- Client side only. Nothing to install on a server. Every player on screen is posed with
+  their own model.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Argorice/EpicYSM/main/branding/scythe.gif" width="49%" alt="Scythe combo on an encrypted YSM model">
@@ -51,6 +52,9 @@ Things that happen on their own:
   with the attack key are Epic Fight's.
 - Yes Steve Model's start-up warning about Epic Fight is withdrawn, since this mod is the
   compatibility it warns about.
+- Other players get the same treatment: whatever model YSM shows for them on your client is
+  what fights, readable or encrypted, each with its own skeleton. A model switched
+  mid-session is picked up on the spot.
 
 ## Settings
 
@@ -104,10 +108,9 @@ motion (when physics is enabled in the settings).
 
 ## Known limits
 
-- Other players are posed the same way, as long as this client sees their model: Yes Steve
-  Model shares model choices through the server, so it needs YSM installed there (Epic Fight
-  already requires that). Players whose model this client does not have are shown with the
-  default Epic Fight body.
+- A player whose model this client does not have is shown with the default Epic Fight body.
+  Yes Steve Model shares model choices through the server, so it needs YSM installed there
+  (Epic Fight already requires that).
 - Epic Fight hides the off-hand item while a two-handed weapon is held. The mod follows the
   same rule on encrypted models, so a shield disappears with a greatsword.
 - Weapon renderers from add-ons that pose Epic Fight's armature themselves are shown on a
