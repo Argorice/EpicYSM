@@ -712,8 +712,35 @@ public final class YsmModelSource {
         return new java.util.ArrayList<>(out);
     }
 
+    /**
+     * An entry name from a model's own json is only ever a relative path
+     * inside that model: no drive letters, no leading slash, no "..".
+     */
+    static boolean insideModel(@Nullable String entryPath) {
+        if (entryPath == null || entryPath.isEmpty() || entryPath.length() > 512) {
+            return false;
+        }
+
+        if (entryPath.startsWith("/") || entryPath.startsWith("\\") || entryPath.indexOf(':') >= 0
+                || entryPath.indexOf('\0') >= 0) {
+            return false;
+        }
+
+        for (String part : entryPath.split("[/\\\\]")) {
+            if (part.equals("..")) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     @Nullable
     private byte[] readBytes(String entryPath) {
+        if (!insideModel(entryPath)) {
+            return null;
+        }
+
         try {
             if (this.zip) {
                 try (ZipFile zipFile = new ZipFile(this.path.toFile())) {
@@ -728,10 +755,16 @@ public final class YsmModelSource {
                     }
                 }
             } else {
-                Path file = this.path.resolve(entryPath);
+                Path root = this.path.toAbsolutePath().normalize();
+                Path file = root.resolve(entryPath).normalize();
+
+                if (!file.startsWith(root)) {
+                    return null;
+                }
+
                 return Files.isRegularFile(file) ? Files.readAllBytes(file) : null;
             }
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
             return null;
         }
     }

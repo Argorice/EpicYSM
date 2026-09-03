@@ -17,8 +17,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 
 import javax.annotation.Nullable;
 
@@ -531,32 +529,11 @@ public final class YsmGeometryProbe {
             seeds.add(player);
         }
 
-        Path jar = ysmJarPath();
-
-        if (jar == null) {
-            return seeds;
-        }
-
         ClassLoader loader = renderer.getClass().getClassLoader();
         Set<Class<?>> done = new HashSet<>();
 
-        try (ZipFile zipFile = new ZipFile(jar.toFile())) {
-            var entries = zipFile.entries();
-
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String name = entry.getName();
-
-                if (!name.endsWith(".class")) {
-                    continue;
-                }
-
-                String className = name.substring(0, name.length() - 6).replace('/', '.');
-
-                if (!className.startsWith(YSM_PACKAGE)) {
-                    continue;
-                }
-
+        try {
+            for (String className : YsmClasses.names()) {
                 try {
                     Class<?> type = Class.forName(className, false, loader);
 
@@ -657,14 +634,6 @@ public final class YsmGeometryProbe {
     }
 
     @Nullable
-    private static Path ysmJarPath() {
-        try {
-            var modFile = net.neoforged.fml.ModList.get().getModFileById("yes_steve_model");
-            return modFile == null ? null : modFile.getFile().getFilePath();
-        } catch (Throwable t) {
-            return null;
-        }
-    }
 
     private static Field[] safeFields(Class<?> type) {
         try {

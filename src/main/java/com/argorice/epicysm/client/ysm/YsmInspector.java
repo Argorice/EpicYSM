@@ -21,8 +21,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.AbstractClientPlayer;
@@ -349,35 +347,13 @@ public final class YsmInspector {
             } catch (Throwable ignored) {
             }
 
-            Path jar = ysmJarPath();
-
-            if (jar == null) {
-                return;
-            }
-
             ClassLoader loader = this.renderer.getClass().getClassLoader();
 
-            try (ZipFile zipFile = new ZipFile(jar.toFile())) {
-                var entries = zipFile.entries();
-
-                while (entries.hasMoreElements()) {
-                    ZipEntry entry = entries.nextElement();
-                    String name = entry.getName();
-
-                    if (!name.endsWith(".class")) {
-                        continue;
-                    }
-
-                    String className = name.substring(0, name.length() - 6).replace('/', '.');
-
-                    if (className.startsWith(YSM_PACKAGE)) {
-                        try {
-                            this.pushStatics(Class.forName(className, false, loader), "static:" + shortName(className));
-                        } catch (Throwable ignored) {
-                        }
-                    }
+            for (String className : YsmClasses.names()) {
+                try {
+                    this.pushStatics(Class.forName(className, false, loader), "static:" + shortName(className));
+                } catch (Throwable ignored) {
                 }
-            } catch (IOException ignored) {
             }
         }
 
@@ -610,19 +586,6 @@ public final class YsmInspector {
         }
 
         return describeClass(value);
-    }
-
-    private static Path ysmJarPath() {
-        try {
-            var modFile = net.neoforged.fml.ModList.get().getModFileById("yes_steve_model");
-
-            if (modFile != null) {
-                return modFile.getFile().getFilePath();
-            }
-        } catch (Throwable ignored) {
-        }
-
-        return null;
     }
 
     private static Field[] safeFields(Class<?> type) {
