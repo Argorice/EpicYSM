@@ -18,6 +18,11 @@
 - Нужны Epic Fight 21.15+ и Yes Steve Model 2.6+
 - Только клиент. На сервер ставить ничего не нужно.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Argorice/EpicYSM/main/branding/scythe.gif" width="49%" alt="Комбо косой на зашифрованной модели YSM">
+  <img src="https://raw.githubusercontent.com/Argorice/EpicYSM/main/branding/katana.gif" width="49%" alt="Уклонение и удар длинным клинком">
+</p>
+
 ## Как это работает
 
 Модели YSM бывают двух видов, и мод работает с обоими.

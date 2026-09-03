@@ -18,6 +18,11 @@ animations exactly as before.
 - Requires Epic Fight 21.15+ and Yes Steve Model 2.6+
 - Client side only. Nothing to install on a server.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Argorice/EpicYSM/main/branding/scythe.gif" width="49%" alt="Scythe combo on an encrypted YSM model">
+  <img src="https://raw.githubusercontent.com/Argorice/EpicYSM/main/branding/katana.gif" width="49%" alt="Dodge and slash with a long blade">
+</p>
+
 ## How it works
 
 There are two kinds of YSM models, and the mod handles both.

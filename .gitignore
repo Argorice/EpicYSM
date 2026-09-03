@@ -42,3 +42,6 @@ javac.*.args
 # Model sources used for testing; only the small test model is tracked
 examples/*
 !examples/epicysm_test/
+
+# Uncompressed screen recordings; the small scythe.gif / katana.gif next to them are tracked
+branding/[0-9]*.gif
