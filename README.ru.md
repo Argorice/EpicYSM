@@ -1,4 +1,4 @@
-[English](README.md) | **Русский**
+[English](README.md) | **Русский** · ветка **main** (1.21.1) · [1.20.1 / Forge](https://github.com/Argorice/EpicYSM/tree/1.20.1)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Argorice/EpicYSM/main/branding/banner.png" alt="EpicYSM" width="100%">
@@ -14,7 +14,7 @@
 Вне боевого режима Epic Fight ничего не меняется: эмоции, стойка и ходьба остаются за YSM,
 как и раньше.
 
-- Minecraft 1.21.1, NeoForge
+- Minecraft 1.21.1, NeoForge (эта ветка; ветка [`1.20.1`](https://github.com/Argorice/EpicYSM/tree/1.20.1) - Minecraft 1.20.1 / Forge)
 - Нужны Epic Fight 21.15+ и Yes Steve Model 2.6+
 - Только клиент. На сервер ставить ничего не нужно. Все игроки на экране позируются
   каждый со своей моделью.

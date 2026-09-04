@@ -133,6 +133,7 @@ public final class EpicFightItems {
         }
 
         boolean off = hand == InteractionHand.OFF_HAND;
+        PoseStack.Pose mark = PoseStacks.mark(poseStack);
         poseStack.pushPose();
 
         try {
@@ -191,7 +192,10 @@ public final class EpicFightItems {
 
             return false;
         } finally {
-            poseStack.popPose();
+            // Our own push, and anything the renderer pushed and then failed
+            // to pop - left there, it ends the frame with "Pose stack not
+            // empty".
+            PoseStacks.unwind(poseStack, mark);
         }
     }
 

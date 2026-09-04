@@ -443,6 +443,25 @@ public final class YsmSkeletonOverlay {
     /** Every copy was passed over and none was left: take what there is. */
     private boolean keepDead;
 
+    /**
+     * Whether the copy being posed is still the one Yes Steve Model draws.
+     *
+     * YSM builds its model objects anew now and then - its own screen was
+     * opened, the player came back into view, a resource reload - and the
+     * copy this overlay holds is then no longer the one on screen. Nothing
+     * says so; the pose simply stops showing. What does say so is the
+     * numbers: YSM writes its animation into the copy it draws before every
+     * frame, so a copy in which nothing but this overlay's own writes ever
+     * appear is a copy it no longer draws. Checked on every few frames, and
+     * the model is read again when that has gone on for a while.
+     */
+    @Nullable
+    private float[] leftBehind;
+    private int sinceLivenessCheck;
+    private int stillChecks;
+    private static final int LIVENESS_CHECK_EVERY = 4;
+    private static final int STILL_CHECKS_BEFORE_REREAD = 30;
+
     /** How many times the live skeleton has been looked for and not found. */
     private static final int MAX_SEARCHES = 8;
     private static final int SEARCH_EVERY = 10;
@@ -504,6 +523,8 @@ public final class YsmSkeletonOverlay {
         this.form = "";
         this.dormant = false;
         this.sinceFormCheck = 0;
+        this.leftBehind = null;
+        this.stillChecks = 0;
         this.formBones = Map.of();
         this.parentBone = Map.of();
         java.util.Arrays.fill(this.movedInGroup, 0);
@@ -2700,6 +2721,64 @@ public final class YsmSkeletonOverlay {
     }
 
     private void writePose(AbstractClientPlayer player, float partialTicks) {
+        if (!this.probe && this.copyNoLongerDrawn()) {
+            return;
+        }
+
+        this.writePoseNow(player, partialTicks);
+
+        // Every few frames, what was left in the slots; next frame says
+        // whether Yes Steve Model wrote over it.
+        if (!this.probe && !this.keepDead && epicFightInCharge(player)
+                && ++this.sinceLivenessCheck % LIVENESS_CHECK_EVERY == 0) {
+            this.leftBehind = this.sampleAll();
+        }
+    }
+
+    /**
+     * True when Yes Steve Model has not touched the skeleton being posed
+     * for long enough to say it no longer draws it. The model is then read
+     * again, the way it is after a switch.
+     */
+    private boolean copyNoLongerDrawn() {
+        float[] left = this.leftBehind;
+        this.leftBehind = null;
+
+        if (left == null) {
+            return false;
+        }
+
+        float[] now = this.sampleAll();
+
+        if (now.length == left.length) {
+            for (int i = 0; i < now.length; i++) {
+                if (Math.abs(now[i] - left[i]) > 1.0E-5F) {
+                    this.stillChecks = 0;
+                    return false;
+                }
+            }
+        }
+
+        if (++this.stillChecks < STILL_CHECKS_BEFORE_REREAD) {
+            return false;
+        }
+
+        EpicYsm.LOGGER.info("Skeleton overlay: Yes Steve Model has stopped animating the skeleton being posed -"
+                + " it draws this model from a newer copy now - so the model is read again");
+        UUID owner = this.owner;
+        ResourceLocation subject = this.subject;
+        this.reset();
+        this.owner = owner;
+        this.subject = subject;
+        this.stage = Stage.IDLE;
+        this.searches = 0;
+        this.sinceSearch = 0;
+        this.deadCopies.clear();
+        this.keepDead = false;
+        return true;
+    }
+
+    private void writePoseNow(AbstractClientPlayer player, float partialTicks) {
         // Only the body on screen is posed; a model that has turned into
         // something else is Yes Steve Model's alone until it turns back.
         if (!this.probe && !this.formStillShown()) {

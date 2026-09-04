@@ -1,4 +1,4 @@
-**English** | [Русский](README.ru.md)
+**English** | [Русский](README.ru.md) · branch **main** (1.21.1) · [1.20.1 / Forge](https://github.com/Argorice/EpicYSM/tree/1.20.1)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Argorice/EpicYSM/main/branding/banner.png" alt="EpicYSM" width="100%">
@@ -14,7 +14,7 @@ weapon in its hand, instead of on the default Epic Fight body.
 Outside of Epic Fight's battle mode nothing changes: YSM keeps doing emotes, idle and walk
 animations exactly as before.
 
-- Minecraft 1.21.1, NeoForge
+- Minecraft 1.21.1, NeoForge (this branch; the [`1.20.1`](https://github.com/Argorice/EpicYSM/tree/1.20.1) branch is Minecraft 1.20.1 / Forge)
 - Requires Epic Fight 21.15+ and Yes Steve Model 2.6+
 - Client side only. Nothing to install on a server. Every player on screen is posed with
   their own model.

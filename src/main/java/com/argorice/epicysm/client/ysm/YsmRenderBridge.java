@@ -25,6 +25,10 @@ public final class YsmRenderBridge {
     private static boolean disabled;
     private static int rendersWithoutWindow;
 
+    /** Renders that ended in an exception; a few are forgiven, more are not. */
+    private static int failures;
+    private static final int FAILURES_ALLOWED = 3;
+
     /** The last size a model was measured being drawn at. */
     private static float lastScale;
     private static boolean saidStep;
@@ -37,6 +41,7 @@ public final class YsmRenderBridge {
     public static void enable() {
         disabled = false;
         rendersWithoutWindow = 0;
+        failures = 0;
     }
 
     private YsmRenderBridge() {
@@ -92,16 +97,31 @@ public final class YsmRenderBridge {
 
         event.setCanceled(true);
         inside = true;
+        com.mojang.blaze3d.vertex.PoseStack.Pose mark = PoseStacks.mark(event.getPoseStack());
 
         try {
             float yaw = Mth.rotLerp(partialTicks, player.yRotO, player.getYRot());
             ((EntityRenderer) renderer).render(player, yaw, partialTicks, event.getPoseStack(), window,
                     event.getPackedLight());
         } catch (Throwable t) {
-            EpicYsm.LOGGER.warn("Yes Steve Model refused to be re-rendered with Epic Fight's pose;"
-                    + " leaving its rendering alone from now on", t);
-            disabled = true;
-            YsmSkeletonOverlay.resetAll();
+            // Whatever it pushed before failing is still on the stack, and
+            // at the end of the frame that stops the game with a message
+            // that names nobody. Cleared here, the failure is one line in
+            // the log and one player drawn by Yes Steve Model alone.
+            PoseStacks.unwind(event.getPoseStack(), mark);
+
+            // Once may be another mod's bad frame; a pattern is this mod's
+            // problem, and then it steps aside for the rest of the session.
+            if (++failures >= FAILURES_ALLOWED) {
+                EpicYsm.LOGGER.warn("Yes Steve Model refused to be re-rendered with Epic Fight's pose {} times;"
+                        + " leaving its rendering alone from now on", failures, t);
+                disabled = true;
+                YsmSkeletonOverlay.resetAll();
+            } else {
+                EpicYsm.LOGGER.warn("Yes Steve Model refused to be re-rendered with Epic Fight's pose"
+                        + " (attempt {} of {})", failures, FAILURES_ALLOWED, t);
+            }
+
             return true;
         } finally {
             inside = false;
@@ -166,7 +186,16 @@ public final class YsmRenderBridge {
      * Buffer source that poses the skeleton the moment it is first asked,
      * and reads the model's size off the pose stack at the first vertex.
      */
-    private static final class Window implements MultiBufferSource {
+    private static final class Window extends MultiBufferSource.BufferSource {
+        /**
+         * Never drawn into. The window is a {@code BufferSource} only so that
+         * a layer which casts the buffer source it is handed - as armor,
+         * cosmetic and weapon add-ons commonly do to flush it - is not
+         * stopped by a ClassCastException halfway through the render. Every
+         * request is passed to the real source underneath.
+         */
+        private static final com.mojang.blaze3d.vertex.ByteBufferBuilder UNUSED = new com.mojang.blaze3d.vertex.ByteBufferBuilder(256);
+
         private final MultiBufferSource delegate;
         private final AbstractClientPlayer player;
         private final float partialTicks;
@@ -197,6 +226,7 @@ public final class YsmRenderBridge {
         Window(MultiBufferSource delegate, AbstractClientPlayer player, float partialTicks,
                com.mojang.blaze3d.vertex.PoseStack poseStack, boolean poseWanted, boolean scaleWanted,
                ResourceLocation texture) {
+            super(UNUSED, new java.util.LinkedHashMap<>());
             this.texture = texture;
             this.delegate = delegate;
             this.player = player;
@@ -238,6 +268,30 @@ public final class YsmRenderBridge {
             VertexConsumer buffer = this.delegate.getBuffer(renderType);
             boolean watching = (this.scaleWanted || this.root != null || this.poseWanted) && !this.measured;
             return watching ? new FirstVertexWatcher(buffer, this) : buffer;
+        }
+
+        // A flush asked of this window is a flush of the real source; there
+        // is nothing of its own to flush.
+
+        @Override
+        public void endBatch() {
+            if (this.delegate instanceof MultiBufferSource.BufferSource source) {
+                source.endBatch();
+            }
+        }
+
+        @Override
+        public void endLastBatch() {
+            if (this.delegate instanceof MultiBufferSource.BufferSource source) {
+                source.endLastBatch();
+            }
+        }
+
+        @Override
+        public void endBatch(RenderType renderType) {
+            if (this.delegate instanceof MultiBufferSource.BufferSource source) {
+                source.endBatch(renderType);
+            }
         }
 
         /** Whether this is the space the model itself is drawn in. */
