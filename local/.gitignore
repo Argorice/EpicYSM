@@ -1,0 +1,4 @@
+# Everything in local/ stays on this machine: notes, drafts, jars for offline
+# builds (local/libs/epicfight*.jar), test worlds. Nothing here is pushed.
+*
+!.gitignore

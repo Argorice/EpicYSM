@@ -1,0 +1,26 @@
+{
+ "spec": 2,
+ "metadata": {
+  "name": "EpicYSM Test",
+  "license": {
+   "type": "CC0",
+   "desc": "Example model bundled with EpicYSM"
+  },
+  "authors": [
+   {
+    "name": "Argorice"
+   }
+  ]
+ },
+ "properties": {
+  "default_texture": "test",
+  "all_cutout": true
+ },
+ "files": {
+  "player": {
+   "model": {
+    "main": "models/main.json"
+   }
+  }
+ }
+}

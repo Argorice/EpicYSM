@@ -1,0 +1,43 @@
+modLoader = "javafml"
+loaderVersion = "${loader_version_range}"
+license = "${mod_license}"
+issueTrackerURL = "https://github.com/Argorice/EpicYSM/issues"
+clientSideOnly = true
+
+[[mods]]
+modId = "${mod_id}"
+version = "${mod_version}"
+displayName = "${mod_name}"
+authors = "${mod_authors}"
+credits = "Yes Steve Model by TartaricAcid and the YSM team; Epic Fight by Yesman (Antikythera Studios)"
+displayURL = "https://github.com/Argorice/EpicYSM"
+logoFile = "icon.png"
+description = '''${mod_description}'''
+
+[[dependencies.${mod_id}]]
+modId = "forge"
+mandatory = true
+versionRange = "${forge_version_range}"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "minecraft"
+mandatory = true
+versionRange = "${minecraft_version_range}"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.${mod_id}]]
+modId = "epicfight"
+mandatory = true
+versionRange = "${epicfight_version_range}"
+ordering = "AFTER"
+side = "CLIENT"
+
+[[dependencies.${mod_id}]]
+modId = "yes_steve_model"
+mandatory = true
+versionRange = "${ysm_version_range}"
+ordering = "AFTER"
+side = "CLIENT"
