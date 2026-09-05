@@ -137,7 +137,10 @@ EpicYSM is a bridge between two mods that do all the heavy lifting:
 
 - **Yes Steve Model** by TartaricAcid and the YSM team - https://modrinth.com/mod/yes-steve-model
 - **Epic Fight** by Yesman (Antikythera Studios) - https://github.com/Antikythera-Studios/epicfight
-- If you have issues, check the other mod, but there .ysm is decrypted - https://github.com/sakuraimikoto33/YSM-EpicFight-Compat
+- If this mod doesn't work for you, there's an alternative:
+  https://github.com/sakuraimikoto33/YSM-EpicFight-Compat
+  It converts models into Epic Fight meshes (including decrypting
+  encrypted packages) and needs to be installed on the server too.
 
 Model files belong to their authors. EpicYSM never decrypts protected `.ysm` models.
 
