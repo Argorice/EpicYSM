@@ -99,7 +99,6 @@ public final class EpicYsmClient {
                 return;
             }
 
-            com.argorice.epicysm.client.compat.LookOwners.shown(player);
             ModelManager.get().observeRenderer(player, event.getRenderer());
 
             // Yes Steve Model's own render is no longer entered. Two
@@ -109,6 +108,13 @@ public final class EpicYsmClient {
                     && !ModelManager.get().epicFightDraws(player)) {
                 com.argorice.epicysm.client.ysm.YsmRenderBridge.intercept(event, player,
                         textureOf(event.getRenderer(), player), ModelManager.get().shouldYieldToYsm(player));
+            }
+
+            // Only once the bridge has had its say: the animation itself may
+            // have hidden the body this frame, and that is one episode, not
+            // a hiding and a showing every frame.
+            if (!event.isCanceled()) {
+                com.argorice.epicysm.client.compat.LookOwners.shown(player);
             }
         });
 

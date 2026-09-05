@@ -22,7 +22,6 @@ import yesman.epicfight.api.animation.JointTransform;
 import yesman.epicfight.api.animation.Pose;
 import yesman.epicfight.api.utils.math.OpenMatrix4f;
 import yesman.epicfight.api.utils.math.Vec3f;
-import yesman.epicfight.api.utils.math.Vec4f;
 import yesman.epicfight.world.capabilities.EpicFightCapabilities;
 import yesman.epicfight.world.capabilities.entitypatch.LivingEntityPatch;
 
@@ -99,13 +98,17 @@ public final class YsmRenderBridge {
         float partialTicks = event.getPartialTick();
 
         // Where the animation carries the whole body, and how big it draws
-        // it. The skeleton is kept on the spot Yes Steve Model puts it, so
-        // an animation that moves the body away or shrinks it to nothing -
-        // the way a character is made to vanish mid-attack - would go
-        // unnoticed; it is applied to the stack around the render instead.
-        // Only while Epic Fight's pose is what the model shows: in bed, or
-        // out of battle, the model's own animation places the body.
+        // it. The model's bones take rotations only, so the body would stay
+        // on the spot Yes Steve Model puts it while an animation carries it
+        // away or shrinks it to nothing - the way a character is made to
+        // vanish mid-attack. So the carry goes on the stack round the
+        // model's render. Round that alone: the held item's joints already
+        // travel with the animation, the solver moves them, so the item is
+        // drawn after, on the plain stack. Only while Epic Fight's pose is
+        // what the model shows: in bed, or out of battle, the model's own
+        // animation places the body.
         float[] carry = poseWanted && YsmSkeletonOverlay.fighting(player) ? bodyCarry(player, partialTicks) : null;
+        overlay.carriedBy(carry);
 
         if (carry != null && carry[3] < VANISHED && carry[4] < VANISHED && carry[5] < VANISHED) {
             event.setCanceled(true);
@@ -155,10 +158,10 @@ public final class YsmRenderBridge {
                         + " (attempt {} of {})", failures, FAILURES_ALLOWED, t);
             }
 
-            event.getPoseStack().popPose();
             return true;
         } finally {
             inside = false;
+            event.getPoseStack().popPose();
         }
 
         // The model is drawn; the item in its hand is not, because the copy
@@ -213,7 +216,6 @@ public final class YsmRenderBridge {
             YsmSkeletonOverlay.resetAll();
         }
 
-        event.getPoseStack().popPose();
         return true;
     }
 
@@ -516,30 +518,27 @@ public final class YsmRenderBridge {
             }
 
             Vec3f scale = root.scale();
-            Vec3f shift = root.translation();
             boolean atSize = Math.abs(scale.x - 1.0F) < 0.001F && Math.abs(scale.y - 1.0F) < 0.001F
                     && Math.abs(scale.z - 1.0F) < 0.001F;
 
-            if (atSize && shift.x * shift.x + shift.y * shift.y + shift.z * shift.z < 0.0001F) {
+            if (atSize) {
                 return null;
             }
 
-            // The root posed against the root at rest, in the armature's own
-            // space, then through Epic Fight's model matrix into the stack's
-            // - the same road the held item takes.
+            // Only the size. Where the animation carries the body is already
+            // in the bones: the solver gives every driven bone the whole
+            // travel of its joint, root and all, and Yes Steve Model draws
+            // the bones where they are put. Carrying the stack by the same
+            // distance moved the body twice as far as the held item - a
+            // third of a block under the hand in a low stance, a body sunk
+            // into the bed - which is what the numbers Yes Steve Model
+            // reports for the hand showed, once they were asked for.
             Joint joint = patch.getArmature().rootJoint;
             OpenMatrix4f posed = root.getAnimationBoundMatrix(joint, new OpenMatrix4f());
-            OpenMatrix4f rest = joint.getLocalTransform();
-            Vec4f delta = new Vec4f(posed.m30 - rest.m30, posed.m31 - rest.m31, posed.m32 - rest.m32, 0.0F);
-            Vec4f moved = OpenMatrix4f.transform(EpicFightItems.bodySpace(player, patch, partialTicks), delta, null);
-
             float sx = (float) Math.sqrt(posed.m00 * posed.m00 + posed.m01 * posed.m01 + posed.m02 * posed.m02);
             float sy = (float) Math.sqrt(posed.m10 * posed.m10 + posed.m11 * posed.m11 + posed.m12 * posed.m12);
             float sz = (float) Math.sqrt(posed.m20 * posed.m20 + posed.m21 * posed.m21 + posed.m22 * posed.m22);
-
-            // The stack faces the other way from the model matrix, the way
-            // the held item is drawn too.
-            return new float[] { -moved.x, moved.y, -moved.z, sx, sy, sz };
+            return new float[] { 0.0F, 0.0F, 0.0F, sx, sy, sz };
         } catch (Throwable t) {
             return null;
         }

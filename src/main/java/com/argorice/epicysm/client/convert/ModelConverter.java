@@ -179,8 +179,15 @@ public final class ModelConverter {
         HumanoidArmature armature = buildArmature(id, mapper, boneWorld, scales[0], scales[1],
                 animatedDefs, bakedAnimated, physicsDefs, baked, extraIdByBone, jointPositions, guessedJoints, repairedJoints);
         refuseIfNotHumanoid(id, guessedJoints, repairedJoints);
+        Map<String, java.util.Set<String>> boundTo = new HashMap<>();
         HumanoidMesh mesh = bakeMesh(id, geometry, mapper, bonesByName, mainRoot, boneWorld, extraIdByBone,
-                jointPositions, scales[0], scales[1]);
+                jointPositions, scales[0], scales[1], boundTo);
+
+        // Every bone as it was read and what was made of it, for the log:
+        // a model that comes out wrong is understood from the log alone.
+        BoneReport.log(id, displayName, geometry, bonesByName, boneWorld, scales[0], scales[1], mainRoot, mapper,
+                defaultHidden, physicsBones, physicsDefs, baked, animatedDefs, jointPositions, guessedJoints,
+                repairedJoints, boundTo);
 
         return new Result(mesh, armature, displayName, allCutout, baked, bakedAnimated, animation);
     }
@@ -291,6 +298,23 @@ public final class ModelConverter {
         return null;
     }
 
+    /** The bone the extra joint owning this bone's cubes was made for. */
+    @Nullable
+    private static String extraBoneFor(BedrockGeometry.Bone bone, Map<String, BedrockGeometry.Bone> bonesByName,
+                                       Map<String, Integer> extraIdByBone) {
+        BedrockGeometry.Bone current = bone;
+
+        while (current != null) {
+            if (extraIdByBone.containsKey(current.name())) {
+                return current.name();
+            }
+
+            current = current.parent() != null ? bonesByName.get(current.parent()) : null;
+        }
+
+        return null;
+    }
+
     private static String rootAncestorName(BedrockGeometry.Bone bone, Map<String, BedrockGeometry.Bone> bonesByName) {
         BedrockGeometry.Bone current = bone;
 
@@ -373,7 +397,8 @@ public final class ModelConverter {
                                          @Nullable String mainRoot, Map<String, Matrix4f> boneWorld,
                                          Map<String, Integer> extraIdByBone,
                                          Map<String, Vector3f> jointPositions,
-                                         float widthScale, float heightScale) {
+                                         float widthScale, float heightScale,
+                                         Map<String, java.util.Set<String>> outBoundTo) {
         List<String> retargeted = new ArrayList<>();
         List<BakedVertex> vertices = new ArrayList<>();
         Map<MeshPartDefinition, IntList> indices = new HashMap<>();
@@ -402,6 +427,7 @@ public final class ModelConverter {
             // Cubes under a physics or an animated bone follow that joint
             // instead of the rigid body joint, so they can move.
             Integer physicsId = extraJointFor(bone, bonesByName, extraIdByBone);
+            String extraBone = physicsId == null ? null : extraBoneFor(bone, bonesByName, extraIdByBone);
             Matrix4f world = boneWorld.get(bone.name());
 
             for (BedrockGeometry.Cube cube : bone.cubes()) {
@@ -410,6 +436,8 @@ public final class ModelConverter {
                 Vector3f center = cubeCenter(cube, bone, world, widthScale, heightScale);
                 String jointName = placeCube(inherited, named, center, jointPositions, retargeted, bone.name());
                 int jointId = physicsId != null ? physicsId : JointMapper.jointId(jointName);
+                outBoundTo.computeIfAbsent(bone.name(), key -> new java.util.LinkedHashSet<>())
+                        .add(extraBone != null ? "extra:" + extraBone : jointName);
                 MeshPartDefinition partDefinition = partDefinitions.computeIfAbsent(
                         JointMapper.partNameFor(jointName), SimplePartDefinition::new);
                 bakeCube(cube, bone, world, geometry, jointId, partDefinition, vertices, indices, indexCounter, widthScale, heightScale);
@@ -844,7 +872,9 @@ public final class ModelConverter {
             jointMap.put(joint.getName(), joint);
             extraJointsByBone.put(def.boneName(), joint);
             extraWorldByBone.put(def.boneName(), world);
-            outAnimated.add(new AnimatedBones.Baked(def.boneName(), def.id(), def.parentId(), widthScale, heightScale));
+            OpenMatrix4f frame = OpenMatrix4f.importFromMojangMatrix(def.parentFrame());
+            outAnimated.add(new AnimatedBones.Baked(def.boneName(), def.id(), def.parentId(), widthScale, heightScale,
+                    def.restRotation(), frame, frame.transpose(null)));
             outExtraIds.put(def.boneName(), def.id());
         }
 
@@ -855,10 +885,33 @@ public final class ModelConverter {
         Map<String, Joint> physicsJointsByBone = new HashMap<>();
         Map<String, OpenMatrix4f> physicsWorldByBone = new HashMap<>();
 
+        // What each chain hangs from, all the way up to a body joint: a
+        // chain off the hips or the waist is a skirt or a tail, and is
+        // kept off the legs.
+        Map<String, String> above = new HashMap<>();
+
+        for (AnimatedBones.Def def : animatedDefs) {
+            above.put(def.boneName(), def.parentName());
+        }
+
+        for (PhysicsChains.Def def : physicsDefs) {
+            above.put(def.boneName(), def.parentName());
+        }
+
         for (PhysicsChains.Def def : physicsDefs) {
             OpenMatrix4f parentWorld;
             Joint parentJoint;
             boolean chainRoot = !physicsJointsByBone.containsKey(def.parentName());
+            String anchor = def.parentName();
+
+            for (int step = 0; anchor != null && above.containsKey(anchor) && step < 64; step++) {
+                anchor = above.get(anchor);
+            }
+
+            boolean aroundLegs = anchor != null && switch (anchor) {
+                case "Root", "Torso", "Thigh_L", "Thigh_R", "Leg_L", "Leg_R", "Knee_L", "Knee_R" -> true;
+                default -> false;
+            };
 
             if (physicsJointsByBone.containsKey(def.parentName())) {
                 parentJoint = physicsJointsByBone.get(def.parentName());
@@ -893,7 +946,7 @@ public final class ModelConverter {
                     world.m00 * offset.x() + world.m01 * offset.y() + world.m02 * offset.z(),
                     world.m10 * offset.x() + world.m11 * offset.y() + world.m12 * offset.z(),
                     world.m20 * offset.x() + world.m21 * offset.y() + world.m22 * offset.z());
-            outBaked.add(new PhysicsChains.Baked(def.id(), def.parentId(), restLocal, chainRoot));
+            outBaked.add(new PhysicsChains.Baked(def.id(), def.parentId(), restLocal, chainRoot, aroundLegs));
             outExtraIds.put(def.boneName(), def.id());
         }
 

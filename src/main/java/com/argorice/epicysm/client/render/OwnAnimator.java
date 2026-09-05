@@ -328,8 +328,27 @@ public final class OwnAnimator {
      * same reading the converter uses for the geometry.
      */
     private OpenMatrix4f transform(AnimatedBones.Baked def) {
-        return boneTransform(this.rotation, this.position, this.scale, def.widthScale(), def.heightScale());
+        // A bedrock animation adds its turn to the bone's resting turn and
+        // moves it in the frame of the bone above - all of that written in
+        // the model's own rest pose. The mesh already stands in that rest
+        // pose, so what is applied here is only the difference the
+        // animation makes: rest-and-animation over rest, in the frame of
+        // the bone above. Read the animation's turn as if the bone rested
+        // straight and the strand angled in the file turns about the
+        // wrong axes - standing still as much as moving.
+        float[] rest = def.restRotation();
+        TOTAL[0] = rest[0] + this.rotation[0];
+        TOTAL[1] = rest[1] + this.rotation[1];
+        TOTAL[2] = rest[2] + this.rotation[2];
+        OpenMatrix4f moved = boneTransform(TOTAL, this.position, this.scale, def.widthScale(), def.heightScale());
+        OpenMatrix4f resting = boneTransform(rest, NO_OFFSET, NO_SCALE, def.widthScale(), def.heightScale());
+        OpenMatrix4f over = OpenMatrix4f.mul(moved, resting.transpose(null), null);
+        return OpenMatrix4f.mul(OpenMatrix4f.mul(def.parentFrame(), over, null), def.parentFrameInverse(), null);
     }
+
+    private static final float[] TOTAL = new float[3];
+    private static final float[] NO_OFFSET = new float[3];
+    private static final float[] NO_SCALE = { 1.0F, 1.0F, 1.0F };
 
     /** T(position) * Rz * Ry * Rx * S, as a column-major OpenMatrix4f. */
     static OpenMatrix4f boneTransform(float[] rotationDeg, float[] positionPx, float[] scale, float widthScale, float heightScale) {

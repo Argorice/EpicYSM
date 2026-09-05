@@ -346,12 +346,19 @@ public final class YsmPoseSolver {
         return posed;
     }
 
-    /** The hands count as working together once the biped's come this close, in blocks, and stop once they part this far. */
-    private static final float HANDS_MEET = 0.7F;
-    private static final float HANDS_PART = 0.85F;
+    /**
+     * How much the left hand follows the right one, by how close the
+     * biped's hands are: wholly within HANDS_NEAR blocks, not at all beyond
+     * HANDS_FAR, in between in between. A single switch-over distance was
+     * tried first, with a little hysteresis; a stance that holds the hands
+     * right at that distance - a sheath at the hip beside a raised blade -
+     * then switched the hand on and off every few frames.
+     */
+    private static final float HANDS_NEAR = 0.45F;
+    private static final float HANDS_FAR = 0.6F;
 
     /** How fast the left hand moves between its own place and the meeting place, per second. */
-    private static final float HANDS_RATE = 8.0F;
+    private static final float HANDS_RATE = 20.0F;
 
     private boolean handsTogether;
     private float handsWeight;
@@ -403,12 +410,24 @@ public final class YsmPoseSolver {
 
         float apart = bipedLeft.getTranslation(new Vector3f()).distance(bipedRight.getTranslation(new Vector3f()))
                 / this.bipedScale;
-        this.handsTogether = this.handsTogether ? apart < HANDS_PART : apart < HANDS_MEET;
+
+        // A distance that is not a number - the body scaled to nothing -
+        // would stick in the weight for good, and a hand posed by it is
+        // drawn nowhere. It counts as the hands being apart.
+        if (!Float.isFinite(apart)) {
+            apart = HANDS_FAR;
+        }
+
+        if (!Float.isFinite(this.handsWeight)) {
+            this.handsWeight = 0.0F;
+        }
+
+        this.handsTogether = apart < HANDS_NEAR;
 
         long now = System.nanoTime();
         float seconds = this.handsStepped == 0L ? 0.0F : Math.min(0.25F, (now - this.handsStepped) / 1.0e9F);
         this.handsStepped = now;
-        float goal = this.handsTogether ? 1.0F : 0.0F;
+        float goal = apart <= HANDS_NEAR ? 1.0F : apart >= HANDS_FAR ? 0.0F : (HANDS_FAR - apart) / (HANDS_FAR - HANDS_NEAR);
         float step = HANDS_RATE * seconds;
         this.handsWeight = Math.max(0.0F, Math.min(1.0F, this.handsWeight + Math.max(-step, Math.min(step, goal - this.handsWeight))));
 
@@ -423,13 +442,22 @@ public final class YsmPoseSolver {
         Matrix4f wantLeft = between(left, meetLeft, this.handsWeight);
         float offLeft = this.reachArm(posed, "L", wantLeft);
 
-        if (com.argorice.epicysm.client.Diag.on() && now - this.handsTraced > 1_000_000_000L) {
+        // Said once when the hands first meet, then now and then while
+        // they are together - so that the log shows the left hand being
+        // brought to the right one, and how far it fell short.
+        long since = com.argorice.epicysm.client.Diag.on() ? 1_000_000_000L : 30_000_000_000L;
+
+        if (!this.saidHands || now - this.handsTraced > since) {
             this.handsTraced = now;
-            com.argorice.epicysm.client.Diag.info("Hands: biped's {} blocks apart, together {}, weight {}; left hand {} units short",
-                    String.format("%.2f", apart), this.handsTogether, String.format("%.2f", this.handsWeight),
-                    String.format("%.2f", offLeft));
+            EpicYsm.LOGGER.info("Hands: {} the animation holds the hands {} blocks apart, so the left hand is brought"
+                    + " onto what the right one holds (weight {}); it fell {} units short",
+                    this.saidHands ? "still:" : "first time:", String.format(Locale.ROOT, "%.2f", apart),
+                    String.format(Locale.ROOT, "%.2f", this.handsWeight), String.format(Locale.ROOT, "%.2f", offLeft));
+            this.saidHands = true;
         }
     }
+
+    private boolean saidHands;
 
     /** A frame part of the way from one to another: the place straight between, the turn the short way round. */
     private static Matrix4f between(Matrix4f from, Matrix4f to, float part) {
@@ -658,11 +686,30 @@ public final class YsmPoseSolver {
     }
 
     static Quaternionf rotationOf(OpenMatrix4f matrix) {
+        // The turn alone, whatever the size: an animation that shrinks a
+        // joint to nothing - the way a character is made to vanish - hands
+        // over a matrix of zeros, and a turn read straight off it is not a
+        // number. Such a joint is taken as not turned at all.
+        float lx = (float) Math.sqrt(matrix.m00 * matrix.m00 + matrix.m01 * matrix.m01 + matrix.m02 * matrix.m02);
+        float ly = (float) Math.sqrt(matrix.m10 * matrix.m10 + matrix.m11 * matrix.m11 + matrix.m12 * matrix.m12);
+        float lz = (float) Math.sqrt(matrix.m20 * matrix.m20 + matrix.m21 * matrix.m21 + matrix.m22 * matrix.m22);
+
+        if (!(lx > 1.0e-5F) || !(ly > 1.0e-5F) || !(lz > 1.0e-5F)) {
+            return new Quaternionf();
+        }
+
         org.joml.Matrix3f basis = new org.joml.Matrix3f(
-                matrix.m00, matrix.m01, matrix.m02,
-                matrix.m10, matrix.m11, matrix.m12,
-                matrix.m20, matrix.m21, matrix.m22);
-        return new Quaternionf().setFromNormalized(basis).normalize();
+                matrix.m00 / lx, matrix.m01 / lx, matrix.m02 / lx,
+                matrix.m10 / ly, matrix.m11 / ly, matrix.m12 / ly,
+                matrix.m20 / lz, matrix.m21 / lz, matrix.m22 / lz);
+        Quaternionf turn = new Quaternionf().setFromNormalized(basis);
+
+        if (!Float.isFinite(turn.x) || !Float.isFinite(turn.y) || !Float.isFinite(turn.z) || !Float.isFinite(turn.w)
+                || turn.x * turn.x + turn.y * turn.y + turn.z * turn.z + turn.w * turn.w < 1.0e-6F) {
+            return new Quaternionf();
+        }
+
+        return turn.normalize();
     }
 
     @Nullable
@@ -1004,6 +1051,23 @@ public final class YsmPoseSolver {
         return this.bindPlaces;
     }
 
+    /** The joints that had a bone of the model's own to sit on; the rest were taken from the biped. */
+    public java.util.Set<String> sourcedJoints() {
+        return this.sourced;
+    }
+
+    /** How many of this model's units one of Epic Fight's blocks is, by the head's height. */
+    public float unitsPerBipedBlock() {
+        return this.bipedScale;
+    }
+
+    /** Where a bone rests, whole, in the model's units - after every turn the bones above it were built with. */
+    @Nullable
+    public Vector3f restPlaceOf(String boneName) {
+        YsmLiveSkeleton.LiveBone bone = this.byName.get(key(boneName));
+        return bone == null ? null : this.restWorldPivot(bone);
+    }
+
     private int repaired;
 
     public int repaired() {
@@ -1042,6 +1106,10 @@ public final class YsmPoseSolver {
             // carries the whole body forward and a crouch drops it. Leaving
             Matrix4f frame = new Matrix4f(parentWorld).mul(this.jointBindLocal.get(joint));
             Vector3f shift = travel ? localTranslation(pose, joint) : new Vector3f();
+
+            if ("Root".equals(joint)) {
+                this.rootTravel = new Vector3f(shift).mul(unitsPerBlock());
+            }
 
             if (shift.x == 0.0F && shift.y == 0.0F && shift.z == 0.0F) {
                 posed.put(joint, frame.rotate(delta));
@@ -1113,6 +1181,25 @@ public final class YsmPoseSolver {
                     .translate(-pivot.x, -pivot.y, -pivot.z));
         }
 
+        // Nothing of this frame is written when any of it is not a number:
+        // a bone given such a place is drawn nowhere, and the number sticks
+        // in whatever keeps a memory of the last frame.
+        for (Placement placement : out.values()) {
+            Vector3f offset = placement.offset();
+            Quaternionf turn = placement.rotation();
+
+            if (!Float.isFinite(offset.x) || !Float.isFinite(offset.y) || !Float.isFinite(offset.z)
+                    || !Float.isFinite(turn.x) || !Float.isFinite(turn.y) || !Float.isFinite(turn.z) || !Float.isFinite(turn.w)) {
+                if (!this.saidNotANumber) {
+                    this.saidNotANumber = true;
+                    EpicYsm.LOGGER.info("Skeleton solver: the pose had no numbers in it this frame (a joint scaled to nothing);"
+                            + " nothing was written, the model keeps its last pose for the frame");
+                }
+
+                return new HashMap<>();
+            }
+        }
+
         this.posedJoints = posed;
         this.posedBones = boneWorld;
         this.selfCheck(wanted, boneWorld);
@@ -1120,6 +1207,15 @@ public final class YsmPoseSolver {
         this.watchBones(boneWorld);
         this.watchJump(out);
         return out;
+    }
+
+    private boolean saidNotANumber;
+
+    /** How far the animation carried the root joint this frame, in the model's units, for the log. */
+    private Vector3f rootTravel = new Vector3f();
+
+    public Vector3f rootTravel() {
+        return this.rootTravel;
     }
 
     /** Whether the root bone turns on the spot rather than about its joint. */

@@ -15,6 +15,8 @@ import com.google.gson.JsonObject;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 
+import yesman.epicfight.api.utils.math.OpenMatrix4f;
+
 import com.argorice.epicysm.client.model.BedrockGeometry;
 
 /**
@@ -32,11 +34,18 @@ public final class AnimatedBones {
      * One animated joint: appended under parentName (an Epic Fight joint or
      * an earlier animated bone) at the bone's pivot, in scaled model space.
      */
-    public record Def(String boneName, int id, String parentName, int parentId, Vector3f worldPivot) {
+    /**
+     * @param restRotation the bone's own resting turn, degrees, as the model file gives it
+     * @param parentFrame  the turn of the bone above it at rest, all the way up - the frame the
+     *                     model's animation of this bone was written in
+     */
+    public record Def(String boneName, int id, String parentName, int parentId, Vector3f worldPivot,
+                      float[] restRotation, Matrix4f parentFrame) {
     }
 
     /** As the runtime needs it: ids into the pose array, parents first. */
-    public record Baked(String boneName, int id, int parentId, float widthScale, float heightScale) {
+    public record Baked(String boneName, int id, int parentId, float widthScale, float heightScale,
+                        float[] restRotation, OpenMatrix4f parentFrame, OpenMatrix4f parentFrameInverse) {
     }
 
     private AnimatedBones() {
@@ -158,7 +167,11 @@ public final class AnimatedBones {
             Vector3f pivot = worldPivot(bone, boneWorld).mul(widthScale, heightScale, widthScale);
             int id = firstId + defs.size();
             idByBone.put(bone.name(), id);
-            defs.add(new Def(bone.name(), id, parentName, parentId, pivot));
+            float[] rest = bone.rotation() == null ? new float[3] : bone.rotation().clone();
+            Matrix4f above = bone.parent() == null ? null : boneWorld.get(bone.parent());
+            Matrix4f frame = above == null ? new Matrix4f()
+                    : new Matrix4f().rotate(above.getNormalizedRotation(new org.joml.Quaternionf()));
+            defs.add(new Def(bone.name(), id, parentName, parentId, pivot, rest, frame));
         }
 
         return defs;
