@@ -45,18 +45,17 @@ public final class PhysicsChains {
      * A physics joint as the runtime needs it: ids into the pose matrix
      * array and the rest offset expressed in the joint's own bind frame.
      */
-    public record Baked(int id, int parentId, Vector3f restLocal) {
+    public record Baked(int id, int parentId, Vector3f restLocal, boolean chainRoot) {
     }
 
     private PhysicsChains() {
     }
 
-    public static List<Def> collect(BedrockGeometry geometry, JointMapper mapper,
-                                    List<JsonObject> animationFiles, JsonObject overrides,
-                                    Map<String, BedrockGeometry.Bone> bonesByName,
-                                    Map<String, Matrix4f> boneWorld,
-                                    String mainRoot,
-                                    float widthScale, float heightScale) {
+    /** The bones that would swing, before any joint is made of them. */
+    public static Set<String> candidates(BedrockGeometry geometry, JointMapper mapper,
+                                         List<JsonObject> animationFiles, JsonObject overrides,
+                                         Map<String, BedrockGeometry.Bone> bonesByName,
+                                         String mainRoot) {
         Set<String> animated = motionAnimatedBones(animationFiles);
         Set<String> added = new HashSet<>();
         Set<String> removed = new HashSet<>();
@@ -102,6 +101,27 @@ public final class PhysicsChains {
             }
         }
 
+        return candidates;
+    }
+
+    /**
+     * @param animatedIdByBone joints the model's own animation drives; a
+     *                         chain hanging from one of them follows it
+     * @param firstId          the id of the first physics joint
+     */
+    public static List<Def> collect(BedrockGeometry geometry, JointMapper mapper, Set<String> candidates,
+                                    Map<String, BedrockGeometry.Bone> bonesByName,
+                                    Map<String, Matrix4f> boneWorld,
+                                    float widthScale, float heightScale,
+                                    Map<String, Integer> animatedIdByBone, int firstId) {
+        Map<String, List<BedrockGeometry.Bone>> children = new HashMap<>();
+
+        for (BedrockGeometry.Bone bone : geometry.bones()) {
+            if (bone.parent() != null) {
+                children.computeIfAbsent(bone.parent(), key -> new ArrayList<>()).add(bone);
+            }
+        }
+
         // Emit chains parent-first so the simulation can update in order.
         List<Def> defs = new ArrayList<>();
         Map<String, Integer> idByBone = new HashMap<>();
@@ -111,14 +131,29 @@ public final class PhysicsChains {
                 continue;
             }
 
-            String parentName;
-            int parentId;
+            String parentName = null;
+            int parentId = -1;
             BedrockGeometry.Bone parentBone = bone.parent() != null ? bonesByName.get(bone.parent()) : null;
 
             if (parentBone != null && idByBone.containsKey(parentBone.name())) {
                 parentId = idByBone.get(parentBone.name());
                 parentName = parentBone.name();
             } else {
+                // An animated bone above: the chain hangs from it and
+                // moves with the model's own animation.
+                for (BedrockGeometry.Bone above = parentBone; above != null;
+                        above = above.parent() != null ? bonesByName.get(above.parent()) : null) {
+                    Integer id = animatedIdByBone.get(above.name());
+
+                    if (id != null) {
+                        parentName = above.name();
+                        parentId = id;
+                        break;
+                    }
+                }
+            }
+
+            if (parentName == null) {
                 String jointName = mapper.jointFor(bone);
 
                 if (jointName == null) {
@@ -136,7 +171,7 @@ public final class PhysicsChains {
                 continue; // nothing to swing
             }
 
-            int id = FIRST_PHYSICS_JOINT_ID + defs.size();
+            int id = firstId + defs.size();
             idByBone.put(bone.name(), id);
             defs.add(new Def(bone.name(), id, parentName, parentId, pivot, rest));
         }

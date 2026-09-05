@@ -40,7 +40,8 @@ public final class ModelConverter {
     }
 
     public record Result(HumanoidMesh mesh, HumanoidArmature armature, String displayName, boolean allCutout,
-                         List<PhysicsChains.Baked> physicsJoints) {
+                         List<PhysicsChains.Baked> physicsJoints,
+                         List<AnimatedBones.Baked> animatedJoints, OwnAnimation animation) {
     }
 
     /** A perfectly good model that simply is not shaped like a person. */
@@ -124,30 +125,64 @@ public final class ModelConverter {
 
         // Secondary-motion joints: hair, tails, skirts and similar swing
         // freely instead of being welded to the body. Switched off, they
-        List<PhysicsChains.Def> physicsDefs = com.argorice.epicysm.client.EpicYsmConfig.physics()
-                ? PhysicsChains.collect(geometry, mapper, animationFiles, overrides,
-                        bonesByName, boneWorld, mainRoot, scales[0], scales[1])
-                : List.of();
+        // are welded like everything else.
+        java.util.Set<String> physicsBones = com.argorice.epicysm.client.EpicYsmConfig.physics()
+                ? PhysicsChains.candidates(geometry, mapper, animationFiles, overrides, bonesByName, mainRoot)
+                : java.util.Set.of();
+
+        // Bones the model animates itself - a tail, ears, wings, hair - go
+        // on playing the model's own clips while Epic Fight has the body.
+        // A bone that swings by physics does not also play an animation.
+        java.util.Set<String> moving = com.argorice.epicysm.client.EpicYsmConfig.ownAnimations()
+                ? OwnAnimation.movingBones(animationFiles)
+                : java.util.Set.of();
+        List<AnimatedBones.Def> animatedDefs = !com.argorice.epicysm.client.EpicYsmConfig.ownAnimations()
+                || (moving.isEmpty() && (overrides == null || !overrides.has("animation")))
+                ? List.of()
+                : AnimatedBones.collect(geometry, mapper, moving, overrides, bonesByName, boneWorld, mainRoot,
+                        scales[0], scales[1], AnimatedBones.underAny(physicsBones, geometry, bonesByName),
+                        PhysicsChains.FIRST_PHYSICS_JOINT_ID);
+        Map<String, Integer> animatedIdByBone = new HashMap<>();
+
+        for (AnimatedBones.Def def : animatedDefs) {
+            animatedIdByBone.put(def.boneName(), def.id());
+        }
+
+        List<PhysicsChains.Def> physicsDefs = physicsBones.isEmpty()
+                ? List.of()
+                : PhysicsChains.collect(geometry, mapper, physicsBones, bonesByName, boneWorld, scales[0], scales[1],
+                        animatedIdByBone, PhysicsChains.FIRST_PHYSICS_JOINT_ID + animatedDefs.size());
 
         if (!physicsDefs.isEmpty()) {
             com.argorice.epicysm.client.Diag.info("Model {}: {} physics joint(s): {}", id, physicsDefs.size(),
                     physicsDefs.stream().map(PhysicsChains.Def::boneName).toList());
         }
 
-        // The armature is built first on purpose: it decides which physics
+        OwnAnimation animation = animatedDefs.isEmpty()
+                ? OwnAnimation.empty()
+                : OwnAnimation.read(animationFiles, animatedIdByBone.keySet());
+
+        if (!animatedDefs.isEmpty()) {
+            EpicYsm.LOGGER.info("Model {}: {} bone(s) keep the model's own animation in battle: {}; clips: {}", id,
+                    animatedDefs.size(), animatedDefs.stream().map(AnimatedBones.Def::boneName).toList(),
+                    animation.describe());
+        }
+
+        // The armature is built first on purpose: it decides which extra
         // joints actually exist, and only those may own mesh cubes. Binding
         List<PhysicsChains.Baked> baked = new ArrayList<>();
-        Map<String, Integer> physicsIdByBone = new HashMap<>();
+        List<AnimatedBones.Baked> bakedAnimated = new ArrayList<>();
+        Map<String, Integer> extraIdByBone = new HashMap<>();
         Map<String, Vector3f> jointPositions = new HashMap<>();
         List<String> guessedJoints = new ArrayList<>();
         List<String> repairedJoints = new ArrayList<>();
         HumanoidArmature armature = buildArmature(id, mapper, boneWorld, scales[0], scales[1],
-                physicsDefs, baked, physicsIdByBone, jointPositions, guessedJoints, repairedJoints);
+                animatedDefs, bakedAnimated, physicsDefs, baked, extraIdByBone, jointPositions, guessedJoints, repairedJoints);
         refuseIfNotHumanoid(id, guessedJoints, repairedJoints);
-        HumanoidMesh mesh = bakeMesh(id, geometry, mapper, bonesByName, mainRoot, boneWorld, physicsIdByBone,
+        HumanoidMesh mesh = bakeMesh(id, geometry, mapper, bonesByName, mainRoot, boneWorld, extraIdByBone,
                 jointPositions, scales[0], scales[1]);
 
-        return new Result(mesh, armature, displayName, allCutout, baked);
+        return new Result(mesh, armature, displayName, allCutout, baked, bakedAnimated, animation);
     }
 
     /** Stops before drawing a model that has no body to put a skeleton on. */
@@ -237,14 +272,14 @@ public final class ModelConverter {
         return null;
     }
 
-    /** The physics joint owning this bone's cubes: nearest physics ancestor. */
+    /** The extra joint (physics or animated) owning this bone's cubes: the nearest such ancestor. */
     @Nullable
-    private static Integer physicsJointFor(BedrockGeometry.Bone bone, Map<String, BedrockGeometry.Bone> bonesByName,
-                                           Map<String, Integer> physicsIdByBone) {
+    private static Integer extraJointFor(BedrockGeometry.Bone bone, Map<String, BedrockGeometry.Bone> bonesByName,
+                                         Map<String, Integer> extraIdByBone) {
         BedrockGeometry.Bone current = bone;
 
         while (current != null) {
-            Integer id = physicsIdByBone.get(current.name());
+            Integer id = extraIdByBone.get(current.name());
 
             if (id != null) {
                 return id;
@@ -336,7 +371,7 @@ public final class ModelConverter {
     private static HumanoidMesh bakeMesh(String id, BedrockGeometry geometry, JointMapper mapper,
                                          Map<String, BedrockGeometry.Bone> bonesByName,
                                          @Nullable String mainRoot, Map<String, Matrix4f> boneWorld,
-                                         Map<String, Integer> physicsIdByBone,
+                                         Map<String, Integer> extraIdByBone,
                                          Map<String, Vector3f> jointPositions,
                                          float widthScale, float heightScale) {
         List<String> retargeted = new ArrayList<>();
@@ -364,9 +399,9 @@ public final class ModelConverter {
 
             boolean named = mapper.hasKnownName(bone);
 
-            // Cubes under a physics bone follow that joint instead of the
-            // rigid body joint, so they can swing.
-            Integer physicsId = physicsJointFor(bone, bonesByName, physicsIdByBone);
+            // Cubes under a physics or an animated bone follow that joint
+            // instead of the rigid body joint, so they can move.
+            Integer physicsId = extraJointFor(bone, bonesByName, extraIdByBone);
             Matrix4f world = boneWorld.get(bone.name());
 
             for (BedrockGeometry.Cube cube : bone.cubes()) {
@@ -718,8 +753,9 @@ public final class ModelConverter {
 
     private static HumanoidArmature buildArmature(String id, JointMapper mapper, Map<String, Matrix4f> boneWorld,
                                                   float widthScale, float heightScale,
+                                                  List<AnimatedBones.Def> animatedDefs, List<AnimatedBones.Baked> outAnimated,
                                                   List<PhysicsChains.Def> physicsDefs, List<PhysicsChains.Baked> outBaked,
-                                                  Map<String, Integer> outPhysicsIds,
+                                                  Map<String, Integer> outExtraIds,
                                                   Map<String, Vector3f> outJointPositions,
                                                   List<String> outGuessed, List<String> outRepaired) {
         Armature biped = Armatures.BIPED.get();
@@ -784,19 +820,52 @@ public final class ModelConverter {
         Map<String, Joint> jointMap = new HashMap<>();
         Joint root = copyJoint(biped.rootJoint, null, ourWorld, jointMap);
 
-        // Physics joints hang under their parent (an EF joint or an earlier
-        // physics joint), inheriting the parent's bind orientation so the
-        // rest offset is expressible in the joint's own frame.
+        // Animated joints sit at the bone's pivot with no orientation of
+        // their own: at rest their frame is model space, and posed it is
+        // model space turned by whatever their parent did. That is the
+        // frame the model's own animation was authored in.
+        Map<String, Joint> extraJointsByBone = new HashMap<>();
+        Map<String, OpenMatrix4f> extraWorldByBone = new HashMap<>();
+
+        for (AnimatedBones.Def def : animatedDefs) {
+            Joint parentJoint = extraJointsByBone.containsKey(def.parentName())
+                    ? extraJointsByBone.get(def.parentName()) : jointMap.get(def.parentName());
+            OpenMatrix4f parentWorld = extraWorldByBone.containsKey(def.parentName())
+                    ? extraWorldByBone.get(def.parentName()) : ourWorld.get(def.parentName());
+
+            if (parentJoint == null || parentWorld == null) {
+                continue;
+            }
+
+            OpenMatrix4f world = OpenMatrix4f.createTranslation(def.worldPivot().x(), def.worldPivot().y(), def.worldPivot().z());
+            OpenMatrix4f local = OpenMatrix4f.mul(OpenMatrix4f.invert(parentWorld, null), world, null);
+            Joint joint = new Joint("epicysm_anim_" + def.boneName(), def.id(), local);
+            parentJoint.addSubJoints(joint);
+            jointMap.put(joint.getName(), joint);
+            extraJointsByBone.put(def.boneName(), joint);
+            extraWorldByBone.put(def.boneName(), world);
+            outAnimated.add(new AnimatedBones.Baked(def.boneName(), def.id(), def.parentId(), widthScale, heightScale));
+            outExtraIds.put(def.boneName(), def.id());
+        }
+
+        // Physics joints hang under their parent (an EF joint, an animated
+        // joint or an earlier physics joint), inheriting the parent's bind
+        // orientation so the rest offset is expressible in the joint's own
+        // frame.
         Map<String, Joint> physicsJointsByBone = new HashMap<>();
         Map<String, OpenMatrix4f> physicsWorldByBone = new HashMap<>();
 
         for (PhysicsChains.Def def : physicsDefs) {
             OpenMatrix4f parentWorld;
             Joint parentJoint;
+            boolean chainRoot = !physicsJointsByBone.containsKey(def.parentName());
 
             if (physicsJointsByBone.containsKey(def.parentName())) {
                 parentJoint = physicsJointsByBone.get(def.parentName());
                 parentWorld = physicsWorldByBone.get(def.parentName());
+            } else if (extraJointsByBone.containsKey(def.parentName())) {
+                parentJoint = extraJointsByBone.get(def.parentName());
+                parentWorld = extraWorldByBone.get(def.parentName());
             } else {
                 parentJoint = jointMap.get(def.parentName());
                 parentWorld = ourWorld.get(def.parentName());
@@ -824,8 +893,8 @@ public final class ModelConverter {
                     world.m00 * offset.x() + world.m01 * offset.y() + world.m02 * offset.z(),
                     world.m10 * offset.x() + world.m11 * offset.y() + world.m12 * offset.z(),
                     world.m20 * offset.x() + world.m21 * offset.y() + world.m22 * offset.z());
-            outBaked.add(new PhysicsChains.Baked(def.id(), def.parentId(), restLocal));
-            outPhysicsIds.put(def.boneName(), def.id());
+            outBaked.add(new PhysicsChains.Baked(def.id(), def.parentId(), restLocal, chainRoot));
+            outExtraIds.put(def.boneName(), def.id());
         }
 
         // The pose array is indexed by joint id, so it must span the

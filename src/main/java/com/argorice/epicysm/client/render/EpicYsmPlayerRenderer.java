@@ -61,9 +61,29 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         LivingEntityRenderer<AbstractClientPlayer, HumanoidModel<AbstractClientPlayer>>,
         HumanoidMesh> {
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
+    /**
+     * The renderer that held the player slot before this one - Epic Fight's
+     * own, or another mod's - and the players are handed to it whenever they
+     * are not this mod's business.
+     */
+    @javax.annotation.Nullable
+    private final java.util.function.Function<EntityType<?>, yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer> before;
+    private final EntityType<?> entityType;
+    @javax.annotation.Nullable
+    private yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer previous;
+    private boolean previousResolved;
+    private boolean previousBroken;
+
     public EpicYsmPlayerRenderer(EntityRendererProvider.Context context, EntityType<?> entityType) {
+        this(context, entityType, null);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public EpicYsmPlayerRenderer(EntityRendererProvider.Context context, EntityType<?> entityType,
+                                 @javax.annotation.Nullable java.util.function.Function<EntityType<?>, yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer> before) {
         super(context, entityType);
+        this.before = before;
+        this.entityType = entityType;
 
         // Same patched layers PHumanoidRenderer and PPlayerRenderer install.
         // Raw casts: some of them are declared against PlayerModel, but they
@@ -125,6 +145,23 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         ConvertedModel model = ModelManager.get().modelFor(entity);
         this.drawingConverted = model != null;
 
+        // Not this mod's player right now: another mod owns the look (a
+        // transformation), or the player has no Yes Steve Model and a mod
+        // with a player renderer of its own was here first. Whoever held
+        // the slot before draws.
+        if (this.handOver(entity, model)) {
+            yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer previous = this.previous();
+
+            if (previous != null) {
+                this.drawingConverted = false;
+                ModelManager.get().noteEpicFightRendered(entity);
+
+                if (this.renderThrough(previous, entity, entitypatch, renderer, buffer, poseStack, packedLight, partialTicks)) {
+                    return;
+                }
+            }
+        }
+
         // Only a converted model means Epic Fight is really the one drawing
         // this player. Saying so unconditionally, as this used to at the top
         if (model != null) {
@@ -157,8 +194,22 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         }
 
         Armature armature = model != null ? model.armature() : entitypatch.getArmature();
+        boolean lying = model != null && entity.isSleeping();
         poseStack.pushPose();
+
+        // Epic Fight's sleeping pose is written for its own biped: it turns
+        // the root over and lifts it by the height of that body, and a
+        // converted model ends up standing on its head. In bed the model
+        // is laid down the way vanilla does it, in its rest pose.
+        if (lying) {
+            layDown(poseStack, entity, armature);
+        }
+
         this.mulPoseStack(poseStack, armature, entity, entitypatch, partialTicks);
+
+        if (lying) {
+            poseStack.mulPose(com.mojang.math.Axis.XP.rotationDegrees(SLEEP_TILT));
+        }
 
         // Layers (held item, armor, cape, ...) need a renderer whose layer
         // list holds the vanilla layer classes our patched layers pair with.
@@ -175,9 +226,19 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         this.setArmaturePose(entitypatch, entitypatch.getArmature(), partialTicks);
 
         if (model != null) {
-            this.setArmaturePose(entitypatch, armature, partialTicks);
+            if (lying) {
+                armature.setPose(new yesman.epicfight.api.animation.Pose());
+            } else {
+                this.setArmaturePose(entitypatch, armature, partialTicks);
+            }
 
-            if (com.argorice.epicysm.client.EpicYsmConfig.physics()) {
+            // The model's own animation on the bones Epic Fight has no
+            // joint for, then the physics on top of that.
+            if (com.argorice.epicysm.client.EpicYsmConfig.ownAnimations()) {
+                OwnAnimator.get().apply(entity, model, armature, partialTicks);
+            }
+
+            if (com.argorice.epicysm.client.EpicYsmConfig.physics() && !lying) {
                 PhysicsAnimator.get().apply(entity, model, armature, partialTicks);
             }
 
@@ -224,6 +285,125 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         }
 
         poseStack.popPose();
+    }
+
+    private boolean handOver(AbstractClientPlayer entity, @javax.annotation.Nullable ConvertedModel model) {
+        if (com.argorice.epicysm.client.compat.LookOwners.ownsLook(entity)) {
+            return true;
+        }
+
+        return model == null && this.previousIsForeign() && !ModelManager.get().shouldYieldToYsm(entity);
+    }
+
+    /** The renderer that was in the slot before; Epic Fight's own when nothing else was. */
+    @javax.annotation.Nullable
+    private yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer previous() {
+        if (!this.previousResolved) {
+            this.previousResolved = true;
+
+            if (this.before != null) {
+                try {
+                    this.previous = this.before.apply(this.entityType);
+                } catch (Throwable t) {
+                    EpicYsm.LOGGER.warn("The player renderer registered before this mod's could not be created;"
+                            + " players are drawn without it", t);
+                }
+            }
+        }
+
+        return this.previous;
+    }
+
+    /** Whether the renderer before this one belongs to a mod other than Epic Fight. */
+    private boolean previousIsForeign() {
+        yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer previous = this.previous();
+        return previous != null && !previous.getClass().getName().startsWith("yesman.epicfight.");
+    }
+
+    /**
+     * Draws the player through the renderer that held the slot before.
+     * Epic Fight's player renderers, and the ones mods build on them, cast
+     * the vanilla renderer they are handed to PlayerRenderer; when Yes
+     * Steve Model is drawing the player that renderer is YSM's own, so the
+     * vanilla one is borrowed for them, as this renderer does for its
+     * layers. Returns false when the player could not be drawn that way,
+     * and this renderer draws it itself.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private boolean renderThrough(yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer previous,
+                                  AbstractClientPlayer entity, AbstractClientPlayerPatch<AbstractClientPlayer> entitypatch,
+                                  LivingEntityRenderer<AbstractClientPlayer, HumanoidModel<AbstractClientPlayer>> renderer,
+                                  MultiBufferSource buffer, PoseStack poseStack, int packedLight, float partialTicks) {
+        if (this.previousBroken) {
+            return false;
+        }
+
+        Object vanilla = ((Object) renderer) instanceof PlayerRenderer ? renderer : vanillaPlayerRenderer(entity);
+
+        if (vanilla == null) {
+            return false;
+        }
+
+        PoseStack.Pose mark = com.argorice.epicysm.client.ysm.PoseStacks.mark(poseStack);
+
+        try {
+            ((yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer) previous)
+                    .render(entity, entitypatch, (net.minecraft.client.renderer.entity.EntityRenderer) vanilla, buffer, poseStack, packedLight, partialTicks);
+            return true;
+        } catch (Throwable t) {
+            com.argorice.epicysm.client.ysm.PoseStacks.unwind(poseStack, mark);
+            this.previousBroken = true;
+            EpicYsm.LOGGER.warn("The player renderer registered before this mod's ({}) failed to draw a player; from now on"
+                    + " this mod draws players itself, and that mod's own look for them is not shown",
+                    previous.getClass().getName(), t);
+            return false;
+        }
+    }
+
+    /**
+     * Degrees the standing model is tipped over by to lie on its back.
+     * Epic Fight's model space has the body facing -Z, so the head goes to
+     * +Z - back toward the pillow from the foot of the bed, where the
+     * render origin is put.
+     */
+    private static final float SLEEP_TILT = 90.0F;
+
+    /** How far above the entity's feet the model's back lies. */
+    private static final float SLEEP_LIFT = 0.0F;
+
+    /**
+     * The same placement vanilla gives a sleeping player: the render origin
+     * moves from the head of the bed toward its foot by the model's height,
+     * so that the head, once the model is tipped over, lands on the pillow.
+     */
+    private static void layDown(PoseStack poseStack, AbstractClientPlayer entity, Armature armature) {
+        net.minecraft.core.Direction direction = entity.getBedOrientation();
+        float height = headHeight(armature);
+
+        if (direction != null) {
+            poseStack.translate(-direction.getStepX() * height, SLEEP_LIFT, -direction.getStepZ() * height);
+        } else {
+            poseStack.translate(0.0F, SLEEP_LIFT, 0.0F);
+        }
+    }
+
+    /** Where the model's head sits when it stands, in blocks. */
+    private static float headHeight(Armature armature) {
+        try {
+            Joint head = armature.searchJointByName("Head");
+
+            if (head != null) {
+                OpenMatrix4f bind = OpenMatrix4f.invert(head.getToOrigin(), null);
+
+                if (bind.m31 > 0.3F && bind.m31 < 4.0F) {
+                    // The joint is at the neck; the head itself is a little above.
+                    return bind.m31 + 0.15F;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        return 1.5F;
     }
 
     /**

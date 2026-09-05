@@ -16,5 +16,7 @@ public record ConvertedModel(String id,
                              HumanoidArmature armature,
                              ResourceLocation texture,
                              boolean translucent,
-                             java.util.List<PhysicsChains.Baked> physicsJoints) {
+                             java.util.List<PhysicsChains.Baked> physicsJoints,
+                             java.util.List<AnimatedBones.Baked> animatedJoints,
+                             OwnAnimation animation) {
 }

@@ -173,7 +173,7 @@ public final class PhysicsAnimator {
             // A chain root carries everything attached to it (the whole
             // scalp of hair, the full skirt): a hard swing there reads as
             // the piece detaching, so roots bend far less than the tips.
-            float maxAngle = def.parentId() < PhysicsChains.FIRST_PHYSICS_JOINT_ID ? MAX_ANGLE_ROOT : MAX_ANGLE;
+            float maxAngle = def.chainRoot() ? MAX_ANGLE_ROOT : MAX_ANGLE;
 
             if (angle > maxAngle) {
                 angle = maxAngle;

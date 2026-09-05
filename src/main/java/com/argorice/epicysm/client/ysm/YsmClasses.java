@@ -73,6 +73,35 @@ final class YsmClasses {
         return found;
     }
 
+    /**
+     * Yes Steve Model's classes that extend the named class directly, read
+     * off the loader's scan of its jar - so that a class can be found by
+     * what it is rather than by its obfuscated name.
+     */
+    public static List<String> extending(String parentClassName) {
+        List<String> found = new ArrayList<>();
+
+        try {
+            var modFile = ModList.get().getModFileById(MOD_ID);
+            ModFileScanData scan = modFile == null ? null : modFile.getFile().getScanResult();
+
+            if (scan != null) {
+                for (ModFileScanData.ClassData data : scan.getClasses()) {
+                    String className = data.clazz().getClassName();
+                    String parent = data.parent() == null ? null : data.parent().getClassName();
+
+                    if (className.startsWith(YSM_PACKAGE) && parentClassName.equals(parent)) {
+                        found.add(className);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            EpicYsm.LOGGER.debug("Yes Steve Model scan data unavailable", t);
+        }
+
+        return found;
+    }
+
     /** The module the loader built for the mod, listed through the module system. */
     private static List<String> fromModule(Object sample) {
         List<String> found = new ArrayList<>();

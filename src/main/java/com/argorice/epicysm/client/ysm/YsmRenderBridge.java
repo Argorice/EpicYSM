@@ -17,6 +17,15 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.neoforged.neoforge.client.event.RenderLivingEvent;
 
+import yesman.epicfight.api.animation.Joint;
+import yesman.epicfight.api.animation.JointTransform;
+import yesman.epicfight.api.animation.Pose;
+import yesman.epicfight.api.utils.math.OpenMatrix4f;
+import yesman.epicfight.api.utils.math.Vec3f;
+import yesman.epicfight.api.utils.math.Vec4f;
+import yesman.epicfight.world.capabilities.EpicFightCapabilities;
+import yesman.epicfight.world.capabilities.entitypatch.LivingEntityPatch;
+
 import com.argorice.epicysm.EpicYsm;
 
 /** Opens a window inside Yes Steve Model's own render call. */
@@ -87,16 +96,40 @@ public final class YsmRenderBridge {
             overlay.prepare(player, renderer, texture);
         }
 
+        float partialTicks = event.getPartialTick();
+
+        // Where the animation carries the whole body, and how big it draws
+        // it. The skeleton is kept on the spot Yes Steve Model puts it, so
+        // an animation that moves the body away or shrinks it to nothing -
+        // the way a character is made to vanish mid-attack - would go
+        // unnoticed; it is applied to the stack around the render instead.
+        // Only while Epic Fight's pose is what the model shows: in bed, or
+        // out of battle, the model's own animation places the body.
+        float[] carry = poseWanted && YsmSkeletonOverlay.fighting(player) ? bodyCarry(player, partialTicks) : null;
+
+        if (carry != null && carry[3] < VANISHED && carry[4] < VANISHED && carry[5] < VANISHED) {
+            event.setCanceled(true);
+            com.argorice.epicysm.client.compat.LookOwners.hiddenByAnimation(player, renderer);
+            return true;
+        }
+
+        event.getPoseStack().pushPose();
+
+        if (carry != null) {
+            event.getPoseStack().translate(carry[0], carry[1], carry[2]);
+            event.getPoseStack().scale(carry[3], carry[4], carry[5]);
+        }
+
         if (scaleWanted) {
             YsmScaleProbe.get().begin(texture, event.getPoseStack().last().pose());
         }
 
-        float partialTicks = event.getPartialTick();
         Window window = new Window(event.getMultiBufferSource(), player, partialTicks,
                 event.getPoseStack(), poseWanted, scaleWanted, texture);
 
         event.setCanceled(true);
         inside = true;
+
         com.mojang.blaze3d.vertex.PoseStack.Pose mark = PoseStacks.mark(event.getPoseStack());
 
         try {
@@ -122,6 +155,7 @@ public final class YsmRenderBridge {
                         + " (attempt {} of {})", failures, FAILURES_ALLOWED, t);
             }
 
+            event.getPoseStack().popPose();
             return true;
         } finally {
             inside = false;
@@ -179,6 +213,7 @@ public final class YsmRenderBridge {
             YsmSkeletonOverlay.resetAll();
         }
 
+        event.getPoseStack().popPose();
         return true;
     }
 
@@ -456,6 +491,60 @@ public final class YsmRenderBridge {
 
     /** Passes everything through, and says when the first vertex goes by. */
     /** Whether the code asking for a buffer right now is drawing a held item. */
+    /** Below this, a body scaled by its animation is not there to be seen. */
+    private static final float VANISHED = 0.02F;
+
+    /**
+     * The animation's hold on the whole body this frame: the offset it
+     * moves the root by, in the frame of the render event's stack, and the
+     * scale it draws the body at - or null when it leaves both alone.
+     */
+    @Nullable
+    private static float[] bodyCarry(AbstractClientPlayer player, float partialTicks) {
+        try {
+            LivingEntityPatch<?> patch = EpicFightCapabilities.getEntityPatch(player, LivingEntityPatch.class);
+
+            if (patch == null || patch.getAnimator() == null || patch.getArmature() == null) {
+                return null;
+            }
+
+            Pose pose = patch.getAnimator().getPose(partialTicks);
+            JointTransform root = pose == null ? null : pose.getJointTransformData().get("Root");
+
+            if (root == null) {
+                return null;
+            }
+
+            Vec3f scale = root.scale();
+            Vec3f shift = root.translation();
+            boolean atSize = Math.abs(scale.x - 1.0F) < 0.001F && Math.abs(scale.y - 1.0F) < 0.001F
+                    && Math.abs(scale.z - 1.0F) < 0.001F;
+
+            if (atSize && shift.x * shift.x + shift.y * shift.y + shift.z * shift.z < 0.0001F) {
+                return null;
+            }
+
+            // The root posed against the root at rest, in the armature's own
+            // space, then through Epic Fight's model matrix into the stack's
+            // - the same road the held item takes.
+            Joint joint = patch.getArmature().rootJoint;
+            OpenMatrix4f posed = root.getAnimationBoundMatrix(joint, new OpenMatrix4f());
+            OpenMatrix4f rest = joint.getLocalTransform();
+            Vec4f delta = new Vec4f(posed.m30 - rest.m30, posed.m31 - rest.m31, posed.m32 - rest.m32, 0.0F);
+            Vec4f moved = OpenMatrix4f.transform(EpicFightItems.bodySpace(player, patch, partialTicks), delta, null);
+
+            float sx = (float) Math.sqrt(posed.m00 * posed.m00 + posed.m01 * posed.m01 + posed.m02 * posed.m02);
+            float sy = (float) Math.sqrt(posed.m10 * posed.m10 + posed.m11 * posed.m11 + posed.m12 * posed.m12);
+            float sz = (float) Math.sqrt(posed.m20 * posed.m20 + posed.m21 * posed.m21 + posed.m22 * posed.m22);
+
+            // The stack faces the other way from the model matrix, the way
+            // the held item is drawn too.
+            return new float[] { -moved.x, moved.y, -moved.z, sx, sy, sz };
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /**
      * Whether anything at all is being drawn through the item renderer.
      *

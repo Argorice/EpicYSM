@@ -47,6 +47,7 @@ public final class EpicYsmSettingsScreen extends OptionsSubScreen {
                 Codec.STRING.xmap(EpicYsmConfig.Unreadable::parse, EpicYsmConfig.Unreadable::key),
                 v -> Component.translatable("epicysm.settings.unreadable." + v.key()),
                 EpicYsmConfig.Unreadable.values()));
+        this.list.addBig(onOff("own_animations", EpicYsmConfig.ownAnimations(), EpicYsmConfig::setOwnAnimations));
         this.list.addBig(onOff("physics", EpicYsmConfig.physics(), EpicYsmConfig::setPhysics));
         this.list.addBig(onOff("diagnostics", EpicYsmConfig.diagnostics(), EpicYsmConfig::setDiagnostics));
     }

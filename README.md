@@ -52,6 +52,9 @@ Things that happen on their own:
   with the attack key are Epic Fight's.
 - Yes Steve Model's start-up warning about Epic Fight is withdrawn, since this mod is the
   compatibility it warns about.
+- When another mod takes over how a player looks - a transformation into a demon form, say -
+  this mod steps aside for that player until the look is given back, and that mod's own
+  player renderer is kept behind this one rather than replaced.
 - Other players get the same treatment: whatever model YSM shows for them on your client is
   what fights, readable or encrypted, each with its own skeleton. A model switched
   mid-session is picked up on the spot.

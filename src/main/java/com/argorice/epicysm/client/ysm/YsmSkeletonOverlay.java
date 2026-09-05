@@ -1979,6 +1979,18 @@ public final class YsmSkeletonOverlay {
      * Yes Steve Model draws the item itself, and its locator was not
      * collapsed, so anything drawn here would be a second copy.
      */
+    /** Whether this model is drawn with its sideways axis the other way from Epic Fight's. */
+    public boolean mirrorsX() {
+        YsmPoseSolver ready = this.solver;
+        return ready != null && ready.mirrorsX();
+    }
+
+    /** The solver posing this model, once it is; null before then. */
+    @Nullable
+    public YsmPoseSolver solver() {
+        return this.solver;
+    }
+
     public Map<String, Matrix4f> drawnJoints(AbstractClientPlayer player) {
         YsmPoseSolver ready = this.solver;
 
@@ -2701,7 +2713,10 @@ public final class YsmSkeletonOverlay {
         try {
             var patch = EpicFightCapabilities.getEntityPatch(player,
                     yesman.epicfight.world.capabilities.entitypatch.player.PlayerPatch.class);
-            return patch != null && patch.isEpicFightMode() && !drawingABow(player);
+            // In bed, Epic Fight's pose is one written for its own body
+            // (it stands a Yes Steve Model model on its head); the model's
+            // own sleeping animation is the right one there.
+            return patch != null && patch.isEpicFightMode() && !drawingABow(player) && !player.isSleeping();
         } catch (Throwable t) {
             return false;
         }
