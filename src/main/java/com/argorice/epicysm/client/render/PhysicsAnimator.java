@@ -4,6 +4,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import javax.annotation.Nullable;
+
 import org.joml.Vector3f;
 
 import net.minecraft.client.player.AbstractClientPlayer;
@@ -32,13 +34,34 @@ public final class PhysicsAnimator {
     private static final float GRAVITY = 8.0F;       // extra droop while swinging, blocks/s^2
     private static final float MAX_ANGLE = 1.05F;      // radians a chain segment may bend
     private static final float MAX_ANGLE_ROOT = 0.35F; // chain roots hold the whole hairdo/skirt: stay firm
+    private static final float MAX_ANGLE_LEGS = 1.5F;  // a skirt panel pushed by a knee may swing right up
     private static final float MAX_DT = 0.05F;         // clamp for lag spikes, seconds
+    private static final float MAX_TARGET_SPEED = 25.0F; // the target's own speed, as far as the damping follows it, blocks/s
+    private static final float MAX_STEP = 0.35F;       // how far a tip may move in one frame, in segment lengths
+
+    /** The legs, as far as a skirt is concerned: a thigh this thick, plus this much cloth. */
+    private static final float LEG_RADIUS = 0.11F;
+    private static final float CLOTH_GAP = 0.03F;
+
+    /** Points along a hanging piece, from the pivot, that are kept off the legs. */
+    private static final float[] SAMPLES = { 0.25F, 0.5F, 0.75F, 1.0F };
+
+    // Epic Fight's biped, by joint id.
+    private static final int ROOT = 0;
+    private static final int THIGH_R = 1;
+    private static final int LEG_R = 2;
+    private static final int THIGH_L = 4;
+    private static final int LEG_L = 5;
+    private static final int TORSO = 7;
 
     private static final class JointState {
         final Vector3f tip = new Vector3f();
         final Vector3f velocity = new Vector3f();
         final Vector3f previousTarget = new Vector3f();
         boolean initialized;
+        /** How far from the legs each sample point hangs at rest: closer than this is a leg coming through. */
+        @Nullable
+        float[] restClearance;
     }
 
     private static final class EntityState {
@@ -87,6 +110,7 @@ public final class PhysicsAnimator {
         Vec3 origin = entity.getPosition(partialTicks);
 
         OpenMatrix4f[] poses = armature.getPoseMatrices();
+        Vector3f[][] legs = this.legs(poses, armature, sin, cos, origin);
 
         for (PhysicsChains.Baked def : model.physicsJoints()) {
             var joint = armature.searchJointById(def.id());
@@ -119,6 +143,11 @@ public final class PhysicsAnimator {
                 js.velocity.set(0.0F, 0.0F, 0.0F);
                 js.previousTarget.set(targetTip);
                 js.initialized = true;
+
+                if (def.aroundLegs()) {
+                    js.restClearance = this.restClearance(joint, def, armature);
+                }
+
                 continue;
             }
 
@@ -136,12 +165,36 @@ public final class PhysicsAnimator {
                     continue;
                 }
 
+                // A swing Epic Fight plays moves the body far in a frame or
+                // two; the damping follows the target's speed only so far,
+                // or the tip is slung after it.
+                if (targetVelocity.length() > MAX_TARGET_SPEED) {
+                    targetVelocity.normalize(MAX_TARGET_SPEED);
+                }
+
                 Vector3f acceleration = new Vector3f(targetTip).sub(js.tip).mul(STIFFNESS);
                 acceleration.y -= GRAVITY;
                 Vector3f relativeVelocity = new Vector3f(js.velocity).sub(targetVelocity);
                 acceleration.sub(relativeVelocity.mul(DAMPING));
                 js.velocity.add(acceleration.mul(dt));
-                js.tip.add(new Vector3f(js.velocity).mul(dt));
+
+                // And however fast, a tip moves only so far in one frame.
+                Vector3f step = new Vector3f(js.velocity).mul(dt);
+                float most = length * MAX_STEP;
+
+                if (step.length() > most) {
+                    step.normalize(most);
+                    js.velocity.set(step).div(dt);
+                }
+
+                js.tip.add(step);
+            }
+
+            // A skirt, a coat, a tail: whatever hangs from the hips or the
+            // waist is kept off the legs, so a knee coming up does not come
+            // out through the cloth.
+            if (def.aroundLegs() && legs != null) {
+                this.keepOffLegs(js, pivotWorld, legs);
             }
 
             // Keep the segment length: the tip slides on a sphere.
@@ -173,7 +226,7 @@ public final class PhysicsAnimator {
             // A chain root carries everything attached to it (the whole
             // scalp of hair, the full skirt): a hard swing there reads as
             // the piece detaching, so roots bend far less than the tips.
-            float maxAngle = def.parentId() < PhysicsChains.FIRST_PHYSICS_JOINT_ID ? MAX_ANGLE_ROOT : MAX_ANGLE;
+            float maxAngle = def.aroundLegs() && def.chainRoot() ? MAX_ANGLE_LEGS : def.chainRoot() ? MAX_ANGLE_ROOT : MAX_ANGLE;
 
             if (angle > maxAngle) {
                 angle = maxAngle;
@@ -191,6 +244,212 @@ public final class PhysicsAnimator {
             OpenMatrix4f rotator = axisAngleAround(axis, angle, pivotModel);
             poses[def.id()] = OpenMatrix4f.mul(rotator, base, null);
         }
+    }
+
+    /**
+     * The two legs this frame, in world space: hip, knee and ankle of
+     * each. A model rarely has a knee joint of its own (one bone per leg is
+     * the rule), so the leg is taken as the thigh joint's own down
+     * direction, as long as the hip stood high at rest - the foot is on
+     * the ground - bent at the knee joint's direction where there is one.
+     */
+    @Nullable
+    private Vector3f[][] legs(OpenMatrix4f[] poses, Armature armature, float sin, float cos, Vec3 origin) {
+        Vector3f[][] out = new Vector3f[2][];
+
+        for (int side = 0; side < 2; side++) {
+            int thighId = side == 0 ? THIGH_R : THIGH_L;
+            int legId = side == 0 ? LEG_R : LEG_L;
+
+            if (thighId >= poses.length || poses[thighId] == null) {
+                return null;
+            }
+
+            var thigh = armature.searchJointById(thighId);
+
+            if (thigh == null) {
+                return null;
+            }
+
+            float legLength = OpenMatrix4f.invert(thigh.getToOrigin(), null).m31;
+
+            if (!(legLength > 0.05F)) {
+                return null;
+            }
+
+            Vector3f hipModel = translation(poses[thighId]);
+            Vector3f thighDown = transformDirection(poses[thighId], new Vector3f(0.0F, -1.0F, 0.0F));
+            Vector3f shinDown = legId < poses.length && poses[legId] != null
+                    ? transformDirection(poses[legId], new Vector3f(0.0F, -1.0F, 0.0F)) : thighDown;
+
+            if (thighDown.lengthSquared() < 1.0E-6F || shinDown.lengthSquared() < 1.0E-6F) {
+                return null;
+            }
+
+            thighDown.normalize();
+            shinDown.normalize();
+            Vector3f kneeModel = new Vector3f(hipModel).add(new Vector3f(thighDown).mul(legLength * 0.5F));
+            Vector3f ankleModel = new Vector3f(kneeModel).add(new Vector3f(shinDown).mul(legLength * 0.5F));
+            Vector3f at = new Vector3f((float) origin.x, (float) origin.y, (float) origin.z);
+            out[side] = new Vector3f[] {
+                    rotateY(hipModel, sin, cos).add(at),
+                    rotateY(kneeModel, sin, cos).add(at),
+                    rotateY(ankleModel, sin, cos).add(at) };
+        }
+
+        return out;
+    }
+
+    /**
+     * How far each sample point of a hanging piece is from the legs when
+     * everything stands at rest, in model space. A dress hangs right next
+     * to the legs; that is not a leg coming through, so only coming closer
+     * than this counts.
+     */
+    @Nullable
+    private float[] restClearance(yesman.epicfight.api.animation.Joint joint, PhysicsChains.Baked def, Armature armature) {
+        try {
+            OpenMatrix4f bind = OpenMatrix4f.invert(joint.getToOrigin(), null);
+            Vector3f pivot = translation(bind);
+            Vector3f tip = new Vector3f(pivot).add(def.restLocal());
+            float[] out = new float[SAMPLES.length];
+            java.util.Arrays.fill(out, Float.MAX_VALUE);
+
+            for (int side = 0; side < 2; side++) {
+                var thigh = armature.searchJointById(side == 0 ? THIGH_R : THIGH_L);
+
+                if (thigh == null) {
+                    return null;
+                }
+
+                Vector3f hip = translation(OpenMatrix4f.invert(thigh.getToOrigin(), null));
+                Vector3f ankle = new Vector3f(hip.x, 0.0F, hip.z);
+
+                for (int k = 0; k < SAMPLES.length; k++) {
+                    Vector3f point = new Vector3f(pivot).lerp(tip, SAMPLES[k]);
+                    out[k] = Math.min(out[k], clearance(point, hip, ankle));
+                }
+            }
+
+            return out;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** Distance from a point to a segment. */
+    private static float clearance(Vector3f point, Vector3f from, Vector3f to) {
+        Vector3f along = new Vector3f(to).sub(from);
+        float span = along.lengthSquared();
+
+        if (span < 1.0E-6F) {
+            return point.distance(from);
+        }
+
+        float at = Mth.clamp(new Vector3f(point).sub(from).dot(along) / span, 0.0F, 1.0F);
+        return point.distance(new Vector3f(from).add(along.mul(at)));
+    }
+
+    /**
+     * Keeps a hanging piece off the legs. The piece runs from its pivot
+     * to its tip; a few points along it are tested against each leg,
+     * thigh and shin as capsules of the thigh's thickness plus a little
+     * cloth - but never further than the point hangs from the legs at
+     * rest, or a dress would be thrown off the legs it is meant to cover.
+     * A point that has come too close is pushed straight out, and since
+     * the piece turns about its pivot, the tip goes that much further: a
+     * knee coming up half-way along a skirt panel lifts the whole panel.
+     * The worst point decides, twice over, so one push does not undo another.
+     */
+    private void keepOffLegs(JointState js, Vector3f pivotWorld, Vector3f[][] legs) {
+        float[] rest = js.restClearance;
+
+        for (int pass = 0; pass < 2; pass++) {
+            Vector3f worst = null;
+            float worstLength = 0.0F;
+
+            for (int k = 0; k < SAMPLES.length; k++) {
+                float at = SAMPLES[k];
+                float keep = LEG_RADIUS + CLOTH_GAP;
+
+                if (rest != null && rest[k] < Float.MAX_VALUE) {
+                    keep = Math.min(keep, rest[k] * 0.9F);
+                }
+
+                if (keep <= 0.0F) {
+                    continue;
+                }
+
+                Vector3f point = new Vector3f(pivotWorld).lerp(js.tip, at);
+
+                for (Vector3f[] leg : legs) {
+                    Vector3f push = this.pushOut(point, leg[0], leg[1], keep, pivotWorld);
+
+                    if (push == null) {
+                        push = this.pushOut(point, leg[1], leg[2], keep, pivotWorld);
+                    }
+
+                    if (push == null) {
+                        continue;
+                    }
+
+                    Vector3f atTip = push.mul(Math.min(1.0F / at, 3.0F));
+
+                    if (atTip.length() > worstLength) {
+                        worstLength = atTip.length();
+                        worst = atTip;
+                    }
+                }
+            }
+
+            if (worst == null) {
+                return;
+            }
+
+            js.tip.add(worst);
+            Vector3f out = new Vector3f(worst).normalize();
+            float into = js.velocity.dot(out);
+
+            if (into < 0.0F) {
+                js.velocity.sub(out.mul(into));
+            }
+        }
+    }
+
+    /** How far a point inside a capsule has to move to be out of it, or null when it is out already. */
+    @Nullable
+    private Vector3f pushOut(Vector3f point, Vector3f from, Vector3f to, float keep, Vector3f pivotWorld) {
+        Vector3f along = new Vector3f(to).sub(from);
+        float span = along.lengthSquared();
+
+        if (span < 1.0E-6F) {
+            return null;
+        }
+
+        float at = Mth.clamp(new Vector3f(point).sub(from).dot(along) / span, 0.0F, 1.0F);
+        Vector3f nearest = new Vector3f(from).add(along.mul(at));
+        Vector3f out = new Vector3f(point).sub(nearest);
+        float away = out.length();
+
+        if (away >= keep) {
+            return null;
+        }
+
+        if (away < 1.0E-4F) {
+            // Right on the bone: away from the hips, sideways.
+            out.set(point).sub(pivotWorld);
+            out.y = 0.0F;
+
+            if (out.lengthSquared() < 1.0E-6F) {
+                out.set(1.0F, 0.0F, 0.0F);
+            }
+
+            out.normalize();
+        } else {
+            out.div(away);
+        }
+
+        return out.mul(keep - away);
     }
 
     /* ---------------------------------------------------------------------

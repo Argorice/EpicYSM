@@ -28,6 +28,8 @@
   "epicysm.settings.unreadable.tooltip": "When Epic Fight animations on encrypted models are off: keep the model with its own animations, or keep Epic Fight's animations on a plain body.",
   "epicysm.settings.unreadable.keep_model": "Keep the model",
   "epicysm.settings.unreadable.keep_combat": "Keep the combat",
+  "epicysm.settings.own_animations": "Model's own animation in battle (readable models)",
+  "epicysm.settings.own_animations.tooltip": "Bones Epic Fight has no joint for - tails, ears, wings, hair - keep playing the model's own standing, walking and swimming animation while Epic Fight moves the body. On by default; takes effect after /epicysm reload.",
   "epicysm.settings.physics": "Hair and cloth physics (readable models)",
   "epicysm.settings.physics.tooltip": "Secondary motion on converted models: hair, skirts, capes and ribbons swing with the body. Off by default.",
   "epicysm.settings.diagnostics": "Diagnostics in the log",

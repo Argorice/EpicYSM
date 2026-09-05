@@ -28,6 +28,8 @@
   "epicysm.settings.unreadable.tooltip": "Если анимации Epic Fight на закрытых моделях выключены: оставить модель с её анимациями или оставить анимации Epic Fight на обычном теле.",
   "epicysm.settings.unreadable.keep_model": "Оставить модель",
   "epicysm.settings.unreadable.keep_combat": "Оставить бой",
+  "epicysm.settings.own_animations": "Собственная анимация модели в бою (открытые модели)",
+  "epicysm.settings.own_animations.tooltip": "Кости, для которых у Epic Fight нет сустава - хвост, уши, крылья, волосы - продолжают играть анимацию стойки, ходьбы и плавания самой модели, пока Epic Fight двигает тело. По умолчанию включено; применяется после /epicysm reload.",
   "epicysm.settings.physics": "Физика волос и одежды (открытые модели)",
   "epicysm.settings.physics.tooltip": "Вторичное движение на конвертированных моделях: волосы, юбки, плащи и ленты качаются вместе с телом. По умолчанию выключено.",
   "epicysm.settings.diagnostics": "Диагностика в логе",

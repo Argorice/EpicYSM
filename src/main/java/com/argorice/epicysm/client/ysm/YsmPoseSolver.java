@@ -211,6 +211,8 @@ public final class YsmPoseSolver {
         // where every model has something to measure: the head. It is what
         // a joint with no bone of its own is brought down to.
         float scale = this.modelScale(bipedPlaces);
+        this.bipedScale = scale;
+        this.buildBiped(bipedPlaces, scale);
 
         for (String joint : this.jointOrder) {
             Vector3f found = this.rawPlaceOf(joint);
@@ -291,6 +293,300 @@ public final class YsmPoseSolver {
         this.ready = this.jointBindLocal.size() == this.jointOrder.size() && !this.ordered.isEmpty();
     }
 
+    /* ------------------------------------------------------------------
+     * Epic Fight's own skeleton, at this model's size, in the same frame -
+     * so that where the animation puts one hand against the other can be
+     * read off it and given to this model's hands.
+     * ------------------------------------------------------------------ */
+
+    /** How many of this model's units one of Epic Fight's blocks is, for the biped built beside it. */
+    private float bipedScale = 1.0F;
+
+    /** The biped's own joints at rest, each in its parent's frame, at this model's size. */
+    private final Map<String, Matrix4f> bipedBindLocal = new LinkedHashMap<>();
+
+    private void buildBiped(Map<String, Vector3f> bipedPlaces, float scale) {
+        Map<String, Matrix4f> world = new LinkedHashMap<>();
+
+        for (String joint : this.jointOrder) {
+            Vector3f place = bipedPlaces.get(joint);
+
+            if (place == null) {
+                this.bipedBindLocal.clear();
+                return;
+            }
+
+            String parent = this.jointParent.get(joint);
+            Matrix4f parentWorld = parent == null ? new Matrix4f() : world.get(parent);
+            Quaternionf restWorld = parentWorld.getNormalizedRotation(new Quaternionf()).mul(this.bindRotation(joint));
+            Matrix4f own = new Matrix4f().translation(new Vector3f(place).mul(scale)).rotate(restWorld);
+            world.put(joint, own);
+            this.bipedBindLocal.put(joint, new Matrix4f(parentWorld).invert().mul(own));
+        }
+    }
+
+    /** The biped posed with this frame's animation, joint by joint, in this model's frame and units. */
+    private Map<String, Matrix4f> poseBiped(Pose pose) {
+        Map<String, Matrix4f> posed = new LinkedHashMap<>();
+
+        if (this.bipedBindLocal.size() != this.jointOrder.size()) {
+            return posed;
+        }
+
+        for (String joint : this.jointOrder) {
+            String parent = this.jointParent.get(joint);
+            Matrix4f parentWorld = parent == null ? new Matrix4f() : posed.get(parent);
+            Matrix4f frame = new Matrix4f(parentWorld).mul(this.bipedBindLocal.get(joint));
+            Vector3f shift = travel ? localTranslation(pose, joint) : new Vector3f();
+            float ruler = unitsPerBlock();
+            posed.put(joint, frame.translate(shift.x * ruler, shift.y * ruler, shift.z * ruler)
+                    .rotate(localRotation(pose, joint)));
+        }
+
+        return posed;
+    }
+
+    /**
+     * How much the left hand follows the right one, by how close the
+     * biped's hands are: wholly within HANDS_NEAR blocks, not at all beyond
+     * HANDS_FAR, in between in between. A single switch-over distance was
+     * tried first, with a little hysteresis; a stance that holds the hands
+     * right at that distance - a sheath at the hip beside a raised blade -
+     * then switched the hand on and off every few frames.
+     */
+    private static final float HANDS_NEAR = 0.45F;
+    private static final float HANDS_FAR = 0.6F;
+
+    /** How fast the left hand moves between its own place and the meeting place, per second. */
+    private static final float HANDS_RATE = 20.0F;
+
+    private boolean handsTogether;
+    private float handsWeight;
+    private long handsStepped;
+    private long handsTraced;
+
+    /** How far the hands have been brought together this frame, 0 to 1. */
+    public float handsWeight() {
+        return this.handsWeight;
+    }
+
+    /** How the animation holds the left tool joint against the right, in the space the joints are drawn in; null when unknown. */
+    @Nullable
+    public Matrix4f handsRelationAsDrawn() {
+        Matrix4f relation = this.handsRelation;
+        return relation == null ? null : this.asDrawn(relation);
+    }
+
+    @Nullable
+    private Matrix4f handsRelation;
+
+    /**
+     * Where the animation holds one hand against the other, given to this
+     * model's arms. Epic Fight's animations are written for its own body:
+     * when the two hands work on one thing - a blade being sheathed, a hilt
+     * held in both hands - they stand at a fixed distance and angle from
+     * each other, and on a body with other arms that distance comes out
+     * wrong, so the blade misses the sheath. Here the left hand is brought
+     * to where the biped's stands relative to this model's right hand, and
+     * its upper arm and forearm are turned to reach - so that whatever it
+     * holds meets what the right hand holds, and the hand is on it. Only
+     * while the hands are close; the move in and out is eased over a
+     * fraction of a second.
+     */
+    private void meetHands(Map<String, Matrix4f> posed, Pose pose) {
+        Map<String, Matrix4f> biped = this.poseBiped(pose);
+        Matrix4f bipedRight = biped.get("Tool_R");
+        Matrix4f bipedLeft = biped.get("Tool_L");
+        Matrix4f right = posed.get("Tool_R");
+        Matrix4f left = posed.get("Tool_L");
+
+        if (bipedRight == null || bipedLeft == null || right == null || left == null || this.bipedScale <= 0.0F) {
+            this.handsRelation = null;
+            return;
+        }
+
+        Matrix4f relation = new Matrix4f(bipedRight).invert().mul(bipedLeft);
+        this.handsRelation = relation;
+
+        float apart = bipedLeft.getTranslation(new Vector3f()).distance(bipedRight.getTranslation(new Vector3f()))
+                / this.bipedScale;
+
+        // A distance that is not a number - the body scaled to nothing -
+        // would stick in the weight for good, and a hand posed by it is
+        // drawn nowhere. It counts as the hands being apart.
+        if (!Float.isFinite(apart)) {
+            apart = HANDS_FAR;
+        }
+
+        if (!Float.isFinite(this.handsWeight)) {
+            this.handsWeight = 0.0F;
+        }
+
+        this.handsTogether = apart < HANDS_NEAR;
+
+        long now = System.nanoTime();
+        float seconds = this.handsStepped == 0L ? 0.0F : Math.min(0.25F, (now - this.handsStepped) / 1.0e9F);
+        this.handsStepped = now;
+        float goal = apart <= HANDS_NEAR ? 1.0F : apart >= HANDS_FAR ? 0.0F : (HANDS_FAR - apart) / (HANDS_FAR - HANDS_NEAR);
+        float step = HANDS_RATE * seconds;
+        this.handsWeight = Math.max(0.0F, Math.min(1.0F, this.handsWeight + Math.max(-step, Math.min(step, goal - this.handsWeight))));
+
+        if (this.handsWeight <= 0.0F) {
+            return;
+        }
+
+        // The left tool joint as the animation holds it against the right,
+        // hung off this model's right tool joint - the right hand, and the
+        // blade in it, stay exactly where they are.
+        Matrix4f meetLeft = new Matrix4f(right).mul(relation);
+        Matrix4f wantLeft = between(left, meetLeft, this.handsWeight);
+        float offLeft = this.reachArm(posed, "L", wantLeft);
+
+        // Said once when the hands first meet, then now and then while
+        // they are together - so that the log shows the left hand being
+        // brought to the right one, and how far it fell short.
+        long since = com.argorice.epicysm.client.Diag.on() ? 1_000_000_000L : 30_000_000_000L;
+
+        if (!this.saidHands || now - this.handsTraced > since) {
+            this.handsTraced = now;
+            EpicYsm.LOGGER.info("Hands: {} the animation holds the hands {} blocks apart, so the left hand is brought"
+                    + " onto what the right one holds (weight {}); it fell {} units short",
+                    this.saidHands ? "still:" : "first time:", String.format(Locale.ROOT, "%.2f", apart),
+                    String.format(Locale.ROOT, "%.2f", this.handsWeight), String.format(Locale.ROOT, "%.2f", offLeft));
+            this.saidHands = true;
+        }
+    }
+
+    private boolean saidHands;
+
+    /** A frame part of the way from one to another: the place straight between, the turn the short way round. */
+    private static Matrix4f between(Matrix4f from, Matrix4f to, float part) {
+        Vector3f place = from.getTranslation(new Vector3f()).lerp(to.getTranslation(new Vector3f()), part);
+        Quaternionf turn = from.getNormalizedRotation(new Quaternionf()).slerp(to.getNormalizedRotation(new Quaternionf()), part);
+        return new Matrix4f().translation(place).rotate(turn);
+    }
+
+    /**
+     * Two bones reaching for a frame: the upper arm from the shoulder to
+     * the elbow, the forearm from the elbow to the hand; the hand then
+     * faces the way asked. Returns how far short the hand fell, in units.
+     */
+    private float reachArm(Map<String, Matrix4f> posed, String side, Matrix4f want) {
+        String armName = "Arm_" + side;
+        String handName = "Hand_" + side;
+        String toolName = "Tool_" + side;
+        Matrix4f arm = posed.get(armName);
+        Matrix4f hand = posed.get(handName);
+        Matrix4f tool = posed.get(toolName);
+
+        if (arm == null || hand == null || tool == null) {
+            return Float.NaN;
+        }
+
+        Vector3f target = want.getTranslation(new Vector3f());
+        Quaternionf facing = want.getNormalizedRotation(new Quaternionf());
+        Vector3f shoulder = arm.getTranslation(new Vector3f());
+        Vector3f elbow = hand.getTranslation(new Vector3f());
+        Vector3f wrist = tool.getTranslation(new Vector3f());
+        float upper = shoulder.distance(elbow);
+        float lower = elbow.distance(wrist);
+        Vector3f toTarget = new Vector3f(target).sub(shoulder);
+
+        if (upper < 1.0e-4F || lower < 1.0e-4F || toTarget.lengthSquared() < 1.0e-8F) {
+            return Float.NaN;
+        }
+
+        float reach = Math.max(Math.abs(upper - lower) + 1.0e-3F, Math.min(upper + lower - 1.0e-3F, toTarget.length()));
+        Vector3f dir = new Vector3f(toTarget).normalize();
+
+        // The elbow keeps bending the way it bends now.
+        Vector3f bend = new Vector3f(elbow).sub(shoulder);
+        bend.sub(new Vector3f(dir).mul(bend.dot(dir)));
+
+        if (bend.lengthSquared() < 1.0e-6F) {
+            Vector3f old = new Vector3f(wrist).sub(shoulder);
+            bend = new Vector3f(dir).cross(new Vector3f(old).cross(dir));
+
+            if (bend.lengthSquared() < 1.0e-6F) {
+                bend = new Vector3f(dir).cross(new Vector3f(0.0F, 1.0F, 0.0F));
+            }
+
+            if (bend.lengthSquared() < 1.0e-6F) {
+                bend = new Vector3f(1.0F, 0.0F, 0.0F);
+            }
+        }
+
+        bend.normalize();
+        float cos = (upper * upper + reach * reach - lower * lower) / (2.0F * upper * reach);
+        cos = Math.max(-1.0F, Math.min(1.0F, cos));
+        float sin = (float) Math.sqrt(Math.max(0.0F, 1.0F - cos * cos));
+        Vector3f newElbow = new Vector3f(shoulder).add(new Vector3f(dir).mul(upper * cos)).add(new Vector3f(bend).mul(upper * sin));
+
+        // Turn the upper arm about the shoulder so the elbow lands there,
+        // carrying everything below it; then the forearm about the elbow
+        // so the hand lands on the target.
+        Quaternionf turnArm = new Quaternionf().rotationTo(new Vector3f(elbow).sub(shoulder), new Vector3f(newElbow).sub(shoulder));
+        this.turnAbout(posed, armName, shoulder, turnArm);
+
+        Vector3f elbowNow = posed.get(handName).getTranslation(new Vector3f());
+        Vector3f wristNow = posed.get(toolName).getTranslation(new Vector3f());
+        Quaternionf turnHand = new Quaternionf().rotationTo(new Vector3f(wristNow).sub(elbowNow), new Vector3f(target).sub(elbowNow));
+        this.turnAbout(posed, handName, elbowNow, turnHand);
+
+        // And the hand itself faces the way the animation meant it to.
+        Vector3f wristEnd = posed.get(toolName).getTranslation(new Vector3f());
+        posed.put(toolName, new Matrix4f().translation(wristEnd).rotate(facing));
+        return wristEnd.distance(target);
+    }
+
+    /** Turns a joint about a point, and carries every joint below it along. */
+    private void turnAbout(Map<String, Matrix4f> posed, String joint, Vector3f about, Quaternionf turn) {
+        Matrix4f before = posed.get(joint);
+
+        if (before == null) {
+            return;
+        }
+
+        Matrix4f spin = new Matrix4f().translation(about).rotate(turn).translate(-about.x, -about.y, -about.z);
+        Map<String, Matrix4f> old = new java.util.HashMap<>();
+
+        for (String name : this.jointOrder) {
+            if (this.isBelow(name, joint)) {
+                old.put(name, posed.get(name));
+            }
+        }
+
+        posed.put(joint, new Matrix4f(spin).mul(before));
+
+        for (String name : this.jointOrder) {
+            if (name.equals(joint) || !this.isBelow(name, joint)) {
+                continue;
+            }
+
+            String parent = this.jointParent.get(name);
+            Matrix4f parentOld = parent == null ? null : old.getOrDefault(parent, parent.equals(joint) ? before : null);
+            Matrix4f mine = old.get(name);
+
+            if (parentOld == null || mine == null || posed.get(parent) == null) {
+                continue;
+            }
+
+            Matrix4f local = new Matrix4f(parentOld).invert().mul(mine);
+            posed.put(name, new Matrix4f(posed.get(parent)).mul(local));
+        }
+    }
+
+    /** Whether a joint is the named one or somewhere under it. */
+    private boolean isBelow(String joint, String ancestor) {
+        for (String at = joint; at != null; at = this.jointParent.get(at)) {
+            if (at.equals(ancestor)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /** Depth-first insert so a bone never comes before the one above it. */
     private void addInOrder(YsmLiveSkeleton.LiveBone bone, int depth) {
         if (depth > 32 || this.ordered.contains(bone)) {
@@ -330,6 +626,11 @@ public final class YsmPoseSolver {
      * side, or already turned round to match Epic Fight.
      */
     private boolean mirrorX;
+
+    /** Whether the model's sideways axis runs the other way from Epic Fight's, so that every transform is drawn mirrored. */
+    public boolean mirrorsX() {
+        return this.mirrorX;
+    }
 
     /** How many of this model's own units make one of Epic Fight's blocks. */
     private static final float UNITS_PER_BLOCK = 16.0F / 0.7F;
@@ -385,11 +686,30 @@ public final class YsmPoseSolver {
     }
 
     static Quaternionf rotationOf(OpenMatrix4f matrix) {
+        // The turn alone, whatever the size: an animation that shrinks a
+        // joint to nothing - the way a character is made to vanish - hands
+        // over a matrix of zeros, and a turn read straight off it is not a
+        // number. Such a joint is taken as not turned at all.
+        float lx = (float) Math.sqrt(matrix.m00 * matrix.m00 + matrix.m01 * matrix.m01 + matrix.m02 * matrix.m02);
+        float ly = (float) Math.sqrt(matrix.m10 * matrix.m10 + matrix.m11 * matrix.m11 + matrix.m12 * matrix.m12);
+        float lz = (float) Math.sqrt(matrix.m20 * matrix.m20 + matrix.m21 * matrix.m21 + matrix.m22 * matrix.m22);
+
+        if (!(lx > 1.0e-5F) || !(ly > 1.0e-5F) || !(lz > 1.0e-5F)) {
+            return new Quaternionf();
+        }
+
         org.joml.Matrix3f basis = new org.joml.Matrix3f(
-                matrix.m00, matrix.m01, matrix.m02,
-                matrix.m10, matrix.m11, matrix.m12,
-                matrix.m20, matrix.m21, matrix.m22);
-        return new Quaternionf().setFromNormalized(basis).normalize();
+                matrix.m00 / lx, matrix.m01 / lx, matrix.m02 / lx,
+                matrix.m10 / ly, matrix.m11 / ly, matrix.m12 / ly,
+                matrix.m20 / lz, matrix.m21 / lz, matrix.m22 / lz);
+        Quaternionf turn = new Quaternionf().setFromNormalized(basis);
+
+        if (!Float.isFinite(turn.x) || !Float.isFinite(turn.y) || !Float.isFinite(turn.z) || !Float.isFinite(turn.w)
+                || turn.x * turn.x + turn.y * turn.y + turn.z * turn.z + turn.w * turn.w < 1.0e-6F) {
+            return new Quaternionf();
+        }
+
+        return turn.normalize();
     }
 
     @Nullable
@@ -731,6 +1051,23 @@ public final class YsmPoseSolver {
         return this.bindPlaces;
     }
 
+    /** The joints that had a bone of the model's own to sit on; the rest were taken from the biped. */
+    public java.util.Set<String> sourcedJoints() {
+        return this.sourced;
+    }
+
+    /** How many of this model's units one of Epic Fight's blocks is, by the head's height. */
+    public float unitsPerBipedBlock() {
+        return this.bipedScale;
+    }
+
+    /** Where a bone rests, whole, in the model's units - after every turn the bones above it were built with. */
+    @Nullable
+    public Vector3f restPlaceOf(String boneName) {
+        YsmLiveSkeleton.LiveBone bone = this.byName.get(key(boneName));
+        return bone == null ? null : this.restWorldPivot(bone);
+    }
+
     private int repaired;
 
     public int repaired() {
@@ -770,6 +1107,10 @@ public final class YsmPoseSolver {
             Matrix4f frame = new Matrix4f(parentWorld).mul(this.jointBindLocal.get(joint));
             Vector3f shift = travel ? localTranslation(pose, joint) : new Vector3f();
 
+            if ("Root".equals(joint)) {
+                this.rootTravel = new Vector3f(shift).mul(unitsPerBlock());
+            }
+
             if (shift.x == 0.0F && shift.y == 0.0F && shift.z == 0.0F) {
                 posed.put(joint, frame.rotate(delta));
                 continue;
@@ -780,6 +1121,13 @@ public final class YsmPoseSolver {
             float ruler = unitsPerBlock();
             posed.put(joint, frame.translate(shift.x * ruler, shift.y * ruler, shift.z * ruler)
                     .rotate(delta));
+        }
+
+        // One hand against the other, the way the animation meant it.
+        try {
+            this.meetHands(posed, pose);
+        } catch (Throwable t) {
+            EpicYsm.LOGGER.debug("Could not bring the hands together", t);
         }
 
         // The model's own chain, bone by bone, the way a bedrock model is
@@ -833,6 +1181,25 @@ public final class YsmPoseSolver {
                     .translate(-pivot.x, -pivot.y, -pivot.z));
         }
 
+        // Nothing of this frame is written when any of it is not a number:
+        // a bone given such a place is drawn nowhere, and the number sticks
+        // in whatever keeps a memory of the last frame.
+        for (Placement placement : out.values()) {
+            Vector3f offset = placement.offset();
+            Quaternionf turn = placement.rotation();
+
+            if (!Float.isFinite(offset.x) || !Float.isFinite(offset.y) || !Float.isFinite(offset.z)
+                    || !Float.isFinite(turn.x) || !Float.isFinite(turn.y) || !Float.isFinite(turn.z) || !Float.isFinite(turn.w)) {
+                if (!this.saidNotANumber) {
+                    this.saidNotANumber = true;
+                    EpicYsm.LOGGER.info("Skeleton solver: the pose had no numbers in it this frame (a joint scaled to nothing);"
+                            + " nothing was written, the model keeps its last pose for the frame");
+                }
+
+                return new HashMap<>();
+            }
+        }
+
         this.posedJoints = posed;
         this.posedBones = boneWorld;
         this.selfCheck(wanted, boneWorld);
@@ -840,6 +1207,15 @@ public final class YsmPoseSolver {
         this.watchBones(boneWorld);
         this.watchJump(out);
         return out;
+    }
+
+    private boolean saidNotANumber;
+
+    /** How far the animation carried the root joint this frame, in the model's units, for the log. */
+    private Vector3f rootTravel = new Vector3f();
+
+    public Vector3f rootTravel() {
+        return this.rootTravel;
     }
 
     /** Whether the root bone turns on the spot rather than about its joint. */

@@ -45,18 +45,18 @@ public final class PhysicsChains {
      * A physics joint as the runtime needs it: ids into the pose matrix
      * array and the rest offset expressed in the joint's own bind frame.
      */
-    public record Baked(int id, int parentId, Vector3f restLocal) {
+    /** @param aroundLegs whether the chain hangs from the hips or the waist and is kept off the legs */
+    public record Baked(int id, int parentId, Vector3f restLocal, boolean chainRoot, boolean aroundLegs) {
     }
 
     private PhysicsChains() {
     }
 
-    public static List<Def> collect(BedrockGeometry geometry, JointMapper mapper,
-                                    List<JsonObject> animationFiles, JsonObject overrides,
-                                    Map<String, BedrockGeometry.Bone> bonesByName,
-                                    Map<String, Matrix4f> boneWorld,
-                                    String mainRoot,
-                                    float widthScale, float heightScale) {
+    /** The bones that would swing, before any joint is made of them. */
+    public static Set<String> candidates(BedrockGeometry geometry, JointMapper mapper,
+                                         List<JsonObject> animationFiles, JsonObject overrides,
+                                         Map<String, BedrockGeometry.Bone> bonesByName,
+                                         String mainRoot) {
         Set<String> animated = motionAnimatedBones(animationFiles);
         Set<String> added = new HashSet<>();
         Set<String> removed = new HashSet<>();
@@ -102,23 +102,60 @@ public final class PhysicsChains {
             }
         }
 
+        return candidates;
+    }
+
+    /**
+     * @param animatedIdByBone joints the model's own animation drives; a
+     *                         chain hanging from one of them follows it
+     * @param firstId          the id of the first physics joint
+     */
+    public static List<Def> collect(BedrockGeometry geometry, JointMapper mapper, Set<String> candidates,
+                                    Map<String, BedrockGeometry.Bone> bonesByName,
+                                    Map<String, Matrix4f> boneWorld,
+                                    float widthScale, float heightScale,
+                                    Map<String, Integer> animatedIdByBone, int firstId) {
+        Map<String, List<BedrockGeometry.Bone>> children = new HashMap<>();
+
+        for (BedrockGeometry.Bone bone : geometry.bones()) {
+            if (bone.parent() != null) {
+                children.computeIfAbsent(bone.parent(), key -> new ArrayList<>()).add(bone);
+            }
+        }
+
         // Emit chains parent-first so the simulation can update in order.
         List<Def> defs = new ArrayList<>();
         Map<String, Integer> idByBone = new HashMap<>();
+        List<String> kept = new ArrayList<>();
 
         for (BedrockGeometry.Bone bone : orderedByDepth(geometry, bonesByName)) {
             if (!candidates.contains(bone.name()) || defs.size() >= MAX_JOINTS) {
                 continue;
             }
 
-            String parentName;
-            int parentId;
+            String parentName = null;
+            int parentId = -1;
             BedrockGeometry.Bone parentBone = bone.parent() != null ? bonesByName.get(bone.parent()) : null;
 
             if (parentBone != null && idByBone.containsKey(parentBone.name())) {
                 parentId = idByBone.get(parentBone.name());
                 parentName = parentBone.name();
             } else {
+                // An animated bone above: the chain hangs from it and
+                // moves with the model's own animation.
+                for (BedrockGeometry.Bone above = parentBone; above != null;
+                        above = above.parent() != null ? bonesByName.get(above.parent()) : null) {
+                    Integer id = animatedIdByBone.get(above.name());
+
+                    if (id != null) {
+                        parentName = above.name();
+                        parentId = id;
+                        break;
+                    }
+                }
+            }
+
+            if (parentName == null) {
                 String jointName = mapper.jointFor(bone);
 
                 if (jointName == null) {
@@ -136,12 +173,55 @@ public final class PhysicsChains {
                 continue; // nothing to swing
             }
 
-            int id = FIRST_PHYSICS_JOINT_ID + defs.size();
+            // A strand hangs from its pivot; a scalp, a hat, a band round
+            // the hips sits about it. Swinging the latter about its pivot
+            // slides the whole piece off the body - hair off a head - so
+            // only what hangs is left to swing.
+            if (wrapsPivot(bone, boneWorld, widthScale, heightScale, pivot, rest)) {
+                kept.add(bone.name());
+                continue;
+            }
+
+            int id = firstId + defs.size();
             idByBone.put(bone.name(), id);
             defs.add(new Def(bone.name(), id, parentName, parentId, pivot, rest));
         }
 
+        if (!kept.isEmpty()) {
+            com.argorice.epicysm.client.Diag.info("Physics: {} bone(s) sit about their pivot rather than hang from it"
+                    + " (a scalp, a band) and stay rigid; what hangs below them still swings: {}", kept.size(), kept);
+        }
+
         return defs;
+    }
+
+    /**
+     * Whether the bone's own cubes reach back past the pivot, against the
+     * way the chain hangs, by more than a strand would: the scalp about a
+     * head, a band about the hips.
+     */
+    private static boolean wrapsPivot(BedrockGeometry.Bone bone, Map<String, Matrix4f> boneWorld,
+                                      float widthScale, float heightScale, Vector3f pivot, Vector3f rest) {
+        if (bone.cubes().isEmpty()) {
+            return false;
+        }
+
+        Vector3f back = new Vector3f(rest).normalize().negate();
+        Matrix4f world = boneWorld.get(bone.name());
+        float furthest = 0.0F;
+
+        for (BedrockGeometry.Cube cube : bone.cubes()) {
+            for (int corner = 0; corner < 8; corner++) {
+                float x = cube.origin()[0] + ((corner & 1) == 0 ? 0.0F : cube.size()[0]);
+                float y = cube.origin()[1] + ((corner & 2) == 0 ? 0.0F : cube.size()[1]);
+                float z = cube.origin()[2] + ((corner & 4) == 0 ? 0.0F : cube.size()[2]);
+                Vector3f point = world.transformPosition(new Vector3f(-x / 16.0F, y / 16.0F, z / 16.0F))
+                        .mul(widthScale, heightScale, widthScale);
+                furthest = Math.max(furthest, point.sub(pivot).dot(back));
+            }
+        }
+
+        return furthest > Math.max(0.12F, 0.3F * rest.length());
     }
 
     private static boolean isCandidate(BedrockGeometry.Bone bone, JointMapper mapper, Set<String> animated,

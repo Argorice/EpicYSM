@@ -13,17 +13,17 @@ import com.mojang.blaze3d.vertex.PoseStack;
  * renderer's exception instead of letting it through, it also drops what
  * that renderer left behind.
  */
-final class PoseStacks {
+public final class PoseStacks {
     private PoseStacks() {
     }
 
     /** The top of the stack now, to come back to. */
-    static PoseStack.Pose mark(PoseStack poseStack) {
+    public static PoseStack.Pose mark(PoseStack poseStack) {
         return poseStack.last();
     }
 
     /** Pops whatever was pushed since the mark and not popped. */
-    static void unwind(PoseStack poseStack, PoseStack.Pose mark) {
+    public static void unwind(PoseStack poseStack, PoseStack.Pose mark) {
         // The bottom entry is never popped, whatever the mark says.
         while (poseStack.last() != mark && !poseStack.clear()) {
             poseStack.popPose();

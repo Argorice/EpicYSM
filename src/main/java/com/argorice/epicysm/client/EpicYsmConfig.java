@@ -54,6 +54,7 @@ public final class EpicYsmConfig {
     private static boolean bowByYsm = true;
     private static boolean armorOnModels = false;
     private static boolean physics = false;
+    private static boolean ownAnimations = true;
     private static boolean diagnostics = false;
 
     private EpicYsmConfig() {
@@ -171,6 +172,17 @@ public final class EpicYsmConfig {
         save();
     }
 
+    /** Whether readable models keep their own animation on the bones Epic Fight does not drive. */
+    public static boolean ownAnimations() {
+        ensureLoaded();
+        return ownAnimations;
+    }
+
+    public static void setOwnAnimations(boolean value) {
+        ownAnimations = value;
+        save();
+    }
+
     public static void setDiagnostics(boolean value) {
         diagnostics = value;
         save();
@@ -195,6 +207,7 @@ public final class EpicYsmConfig {
             bowByYsm = flag(json, "bow_by_ysm", bowByYsm);
             armorOnModels = flag(json, "armor_on_models", armorOnModels);
             physics = flag(json, "physics", physics);
+            ownAnimations = flag(json, "own_animations", ownAnimations);
             diagnostics = flag(json, "diagnostics", diagnostics);
 
             try {
@@ -266,6 +279,7 @@ public final class EpicYsmConfig {
         json.addProperty("bow_by_ysm", bowByYsm);
         json.addProperty("armor_on_models", armorOnModels);
         json.addProperty("physics", physics);
+        json.addProperty("own_animations", ownAnimations);
         json.addProperty("diagnostics", diagnostics);
 
         try {

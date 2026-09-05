@@ -15,6 +15,7 @@ import com.mojang.blaze3d.vertex.PoseStack;
 
 import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -131,6 +132,7 @@ public final class EpicFightItems {
             return false;
         }
 
+
         boolean off = hand == InteractionHand.OFF_HAND;
         PoseStack.Pose mark = PoseStacks.mark(poseStack);
         poseStack.pushPose();
@@ -199,7 +201,7 @@ public final class EpicFightItems {
     }
 
     /** Epic Fight's own player model matrix, built with the body's own yaw. */
-    private static OpenMatrix4f bodySpace(AbstractClientPlayer player, LivingEntityPatch<?> patch,
+    static OpenMatrix4f bodySpace(AbstractClientPlayer player, LivingEntityPatch<?> patch,
                                          float partialTicks) {
         if (!modelMatrixFallback) {
             try {

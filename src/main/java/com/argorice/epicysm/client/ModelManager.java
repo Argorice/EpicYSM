@@ -185,6 +185,11 @@ public final class ModelManager {
 
     /** Whether Epic Fight should leave this player to Yes Steve Model. */
     public boolean shouldYieldToYsm(AbstractClientPlayer player) {
+        if (com.argorice.epicysm.client.compat.LookOwners.ownsLook(player)) {
+            // Another mod is drawing this player as something else.
+            return false;
+        }
+
         if (EpicYsmConfig.unreadableModels() == EpicYsmConfig.Unreadable.KEEP_COMBAT) {
             // The player chose Epic Fight animations over the model itself.
             return false;
@@ -481,6 +486,10 @@ public final class ModelManager {
     /** The converted model to draw the given player with, or null for default rendering. */
     @Nullable
     public ConvertedModel modelFor(AbstractClientPlayer player) {
+        if (com.argorice.epicysm.client.compat.LookOwners.ownsLook(player)) {
+            return null;
+        }
+
         // YSM's own selection (Alt+Y) is the single authority: whatever its
         // renderer shows for this player is what fights. If the texture
         Detection detection = this.probedModels.get(player.getUUID());
@@ -528,7 +537,8 @@ public final class ModelManager {
             ModelConverter.Result result = ModelConverter.convert(modelId, source, measured);
             ResourceLocation texture = registerTexture(key, source, detection.texturePath());
             model = new ConvertedModel(modelId, result.displayName(), result.mesh(), result.armature(), texture,
-                    !result.allCutout() && hasTranslucency(source), result.physicsJoints());
+                    !result.allCutout() && hasTranslucency(source), result.physicsJoints(),
+                    result.animatedJoints(), result.animation());
             this.converted.put(key, model);
             EpicYsm.LOGGER.info("Converted model {} ({})", modelId, result.displayName());
             return model;
@@ -584,6 +594,8 @@ public final class ModelManager {
         this.yielded.clear();
         this.textureMatcher.reset();
         com.argorice.epicysm.client.render.PhysicsAnimator.get().reset();
+        com.argorice.epicysm.client.render.OwnAnimator.get().reset();
+        com.argorice.epicysm.client.compat.LookOwners.resetAll();
         com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.resetAll();
         this.diskBoneNames.clear();
         this.sources = null;

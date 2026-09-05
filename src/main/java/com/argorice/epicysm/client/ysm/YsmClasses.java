@@ -77,9 +77,42 @@ final class YsmClasses {
         return found;
     }
 
+    /**
+     * Yes Steve Model's classes that extend the named class directly, read
+     * off the loader's scan of its jar - so that a class can be found by
+     * what it is rather than by its obfuscated name.
+     */
+    public static List<String> extending(String parentClassName) {
+        List<String> found = new ArrayList<>();
+
+        try {
+            var modFile = ModList.get().getModFileById(MOD_ID);
+            ModFileScanData scan = modFile == null ? null : modFile.getFile().getScanResult();
+
+            if (scan != null) {
+                for (ModFileScanData.ClassData data : scan.getClasses()) {
+                    String className = classNameOf(data);
+                    String parent = typeNameOf(data, "parent", "getParent");
+
+                    if (className != null && className.startsWith(YSM_PACKAGE) && parentClassName.equals(parent)) {
+                        found.add(className);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            EpicYsm.LOGGER.debug("Yes Steve Model scan data unavailable", t);
+        }
+
+        return found;
+    }
+
     /** The class name inside a scan entry; the accessor is named differently across loader builds. */
     private static String classNameOf(ModFileScanData.ClassData data) {
-        for (String accessor : new String[] { "clazz", "getClazz" }) {
+        return typeNameOf(data, "clazz", "getClazz");
+    }
+
+    private static String typeNameOf(ModFileScanData.ClassData data, String... accessors) {
+        for (String accessor : accessors) {
             try {
                 Object type = data.getClass().getMethod(accessor).invoke(data);
 

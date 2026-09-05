@@ -20,7 +20,6 @@ import java.util.UUID;
 
 import javax.annotation.Nullable;
 
-import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -135,6 +134,9 @@ public final class YsmSkeletonOverlay {
     private static void role(String boneName, Role value) {
         ROLE_BY_NAME.put(boneName, value);
     }
+
+    /** Names of body parts a model may also give to something that is not the player's body. */
+    private static final Set<String> LOOSE_ALIASES = Set.of("body");
 
     /* ------------------------------------------------------------------
      * Forms: one model, several bodies
@@ -844,6 +846,30 @@ public final class YsmSkeletonOverlay {
                             found.quatAt(), found.matrices(), found.quaternions(), found.pivot());
             byRole.computeIfAbsent(boneRole, key -> new ArrayList<>()).add(bone);
             flat.add(bone);
+        }
+
+        // A bone called "body" that hangs from nothing this mod knows, in a
+        // model that has its AllBody, is not the body: it is the body of a
+        // mount or a pet modelled in beside the player, and is left alone.
+        for (List<Bone> list : byRole.values()) {
+            if (list.size() < 2) {
+                continue;
+            }
+
+            List<Bone> loose = new ArrayList<>();
+
+            for (Bone bone : list) {
+                if (LOOSE_ALIASES.contains(bone.name().toLowerCase(Locale.ROOT)) && parents.get(bone.name()) == null) {
+                    loose.add(bone);
+                }
+            }
+
+            if (!loose.isEmpty() && loose.size() < list.size()) {
+                list.removeAll(loose);
+                flat.removeAll(loose);
+                com.argorice.epicysm.client.Diag.info("Skeleton overlay: {} named like a body part but joined to nothing"
+                        + " this mod knows; left alone, the model has the part itself", loose.stream().map(Bone::name).toList());
+            }
         }
 
         if (byRole.size() < MIN_BONES) {
@@ -1907,6 +1933,7 @@ public final class YsmSkeletonOverlay {
             return false;
         }
 
+        this.askWhereHandsAreDrawn();
         Vector3f euler = new Vector3f();
 
         for (Bone bone : this.heldBones()) {
@@ -1979,6 +2006,18 @@ public final class YsmSkeletonOverlay {
      * Yes Steve Model draws the item itself, and its locator was not
      * collapsed, so anything drawn here would be a second copy.
      */
+    /** Whether this model is drawn with its sideways axis the other way from Epic Fight's. */
+    public boolean mirrorsX() {
+        YsmPoseSolver ready = this.solver;
+        return ready != null && ready.mirrorsX();
+    }
+
+    /** The solver posing this model, once it is; null before then. */
+    @Nullable
+    public YsmPoseSolver solver() {
+        return this.solver;
+    }
+
     public Map<String, Matrix4f> drawnJoints(AbstractClientPlayer player) {
         YsmPoseSolver ready = this.solver;
 
@@ -1987,7 +2026,315 @@ public final class YsmSkeletonOverlay {
             return Map.of();
         }
 
-        return ready.posedJointsAsDrawn();
+        Map<String, Matrix4f> joints = ready.posedJointsAsDrawn();
+        this.glueToHands(joints);
+        return joints;
+    }
+
+    /* ------------------------------------------------------------------
+     * Where the hands were actually drawn
+     *
+     * The item is drawn on the solver's tool joint, and the solver's joint
+     * is where the hand should be - not quite where the hand is. The
+     * model's own hand turns at the wrist and carries its locator with it,
+     * and any bone the solver reads wrong leaves the hand somewhere else
+     * again. Yes Steve Model itself can say where it drew a bone: number
+     * twelve of a bone's slot asks for it, and its renderer then writes
+     * the bone's pivot, as drawn, into the four numbers it keeps beside
+     * the slot.
+     *
+     * What it says is held against the solver's tool joint, the one thing
+     * known to be about right: a report is used only once it has been seen
+     * to move along with the joint - a bone the renderer never visits keeps
+     * where it rested at load - and only while it lies near the joint. An
+     * animation that carries the body away leaves the model's own space
+     * behind the joints, and the item then stays on the joint.
+     * ------------------------------------------------------------------ */
+
+    /** Number twelve of a slot: set, the renderer writes down where it drew the bone. */
+    private static final int TRACK_AT = 11;
+
+    /** How many frames the sideways number has to agree with the joint before its sign is settled. */
+    private static final int REPORTED_VOTES = 20;
+
+    /** How many frames a report has to move with the joint before it is trusted, and how many it may stay put before it is given up on. */
+    private static final int LIVE_VOTES = 12;
+    private static final int DEAD_VOTES = 90;
+
+    /** How the reports of one locator have behaved so far. */
+    private static final class Report {
+        final Bone bone;
+        float[] lastRaw;
+        Vector3f lastJoint;
+        int moved;
+        int stayed;
+        boolean live;
+        boolean dead;
+
+        Report(Bone bone) {
+            this.bone = bone;
+        }
+    }
+
+    /** The locator asked, by hand. */
+    private final Map<Boolean, Report> reports = new java.util.HashMap<>();
+
+    /** Whether the reported sideways number comes turned round: -1 turned, 1 plain, 0 not yet known. */
+    private int reportedSign;
+    private int reportedVote;
+    private int reportedAgreed;
+    private boolean saidReported;
+    private long lastReportLine;
+    private float worstGap;
+    private float worstLeftBehind;
+    private int framesLeftBehind;
+
+    /** The carry the bridge put round the model's render this frame, for the log. */
+    private float[] lastCarry;
+
+    public void carriedBy(@Nullable float[] carry) {
+        this.lastCarry = carry;
+    }
+
+    /** A model read afresh: what its bones said before is forgotten with them. */
+    private void forgetReports() {
+        this.reports.clear();
+        this.reportedSign = 0;
+        this.reportedVote = 0;
+        this.reportedAgreed = 0;
+        this.saidReported = false;
+        this.worstGap = 0.0F;
+        this.worstLeftBehind = 0.0F;
+        this.framesLeftBehind = 0;
+        this.corrections.clear();
+    }
+
+    @Nullable
+    private Report reportFor(boolean left) {
+        Report found = this.reports.get(left);
+
+        if (found != null) {
+            return found;
+        }
+
+        for (Bone bone : this.handLocators) {
+            if (bone.name().toLowerCase(Locale.ROOT).startsWith("left") == left && bone.hasMatrix() && bone.hasQuaternion()) {
+                found = new Report(bone);
+                this.reports.put(left, found);
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    private void askWhereHandsAreDrawn() {
+        for (boolean left : new boolean[] { false, true }) {
+            Report report = this.reportFor(left);
+
+            if (report != null) {
+                report.bone.matrices()[report.bone.matrixAt() + TRACK_AT] = 1.0F;
+            }
+        }
+    }
+
+    /** How far the report may sit from the tool joint and still be the same hand: the wrist's reach, a little over. */
+    private static final float SAME_HAND = 0.15F;
+
+    /** How quickly the correction follows the report, per second. */
+    private static final float CORRECTION_RATE = 30.0F;
+
+    /** Whether the report moves the item at all. */
+    private static final boolean USE_REPORT = false;
+
+    /** The correction from the tool joint to the drawn hand, smoothed over frames, per hand. */
+    private final Map<Boolean, Vector3f> corrections = new java.util.HashMap<>();
+    private long correctionStepped;
+
+    /**
+     * The item's joints, moved by how far Yes Steve Model drew the hand
+     * from the tool joint. The distance is smoothed over frames rather
+     * than taken raw: a report that does not fit this frame - the wrong
+     * render pass, the body carried away - is left out, and the item never
+     * jumps between the joint and the hand.
+     */
+    private void glueToHands(Map<String, Matrix4f> joints) {
+        long now = System.nanoTime();
+        float seconds = this.correctionStepped == 0L ? 0.0F : Math.min(0.1F, (now - this.correctionStepped) / 1.0e9F);
+        this.correctionStepped = now;
+        float follow = 1.0F - (float) Math.exp(-CORRECTION_RATE * seconds);
+
+        for (boolean left : new boolean[] { false, true }) {
+            String tool = left ? "Tool_L" : "Tool_R";
+            Matrix4f joint = joints.get(tool);
+            Report report = joint == null ? null : this.reportFor(left);
+
+            if (report == null) {
+                continue;
+            }
+
+            Vector3f jointAt = joint.getTranslation(new Vector3f());
+            Vector3f at = this.reported(report, jointAt);
+            Vector3f correction = this.corrections.computeIfAbsent(left, key -> new Vector3f());
+
+            if (at != null) {
+                correction.lerp(new Vector3f(at).sub(jointAt), follow);
+            }
+
+            // Measured and written down, not yet acted on: in fast swings
+            // the report runs a frame behind the joint, and in one stance it
+            // sat a quarter of a block aside for no reason found yet. Until
+            // the report is understood the item stays on the joint, which
+            // the same numbers put within three centimetres of the hand.
+            if (!USE_REPORT || correction.lengthSquared() < 1.0e-8F) {
+                continue;
+            }
+
+            Matrix4f glued = new Matrix4f(joint);
+            glued.setTranslation(jointAt.x + correction.x, jointAt.y + correction.y, jointAt.z + correction.z);
+            joints.put(tool, glued);
+
+            if (!left) {
+                this.noteGlue(jointAt, glued.getTranslation(new Vector3f()));
+            }
+        }
+    }
+
+    /**
+     * Where Yes Steve Model drew a locator this frame, in the space the
+     * items are drawn in - blocks, before the model's size - or null when
+     * the report is not yet trusted, has been given up on, or lies too far
+     * from the tool joint to be this frame's hand.
+     */
+    @Nullable
+    private Vector3f reported(Report report, Vector3f jointAt) {
+        Bone bone = report.bone;
+        float[] numbers = bone.quaternions();
+        int at = bone.quatAt();
+        float x = numbers[at];
+        float y = numbers[at + 1];
+        float z = numbers[at + 2];
+
+        if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z) || (x == 0.0F && y == 0.0F && z == 0.0F)) {
+            return null;
+        }
+
+        // Does the report move when the joint does? A number that holds
+        // still through a swing is where the bone rested at load, not
+        // where it is.
+        if (!report.dead && !report.live) {
+            boolean changed = report.lastRaw != null
+                    && (report.lastRaw[0] != x || report.lastRaw[1] != y || report.lastRaw[2] != z);
+            boolean jointMoved = report.lastJoint != null && report.lastJoint.distance(jointAt) > 0.003F;
+
+            if (jointMoved) {
+                if (changed) {
+                    report.moved++;
+                } else {
+                    report.stayed++;
+                }
+            }
+
+            if (report.moved >= LIVE_VOTES && report.moved > report.stayed) {
+                report.live = true;
+                EpicYsm.LOGGER.info("Items: Yes Steve Model says where it draws {} and the number moves with the hand;"
+                        + " the held item is put by it", bone.name());
+            } else if (report.stayed >= DEAD_VOTES && report.moved < LIVE_VOTES) {
+                report.dead = true;
+                EpicYsm.LOGGER.info("Items: Yes Steve Model's number for where it draws {} stays put while the hand moves"
+                        + " ({} frames); not used, the held item stays on the solver's joint", bone.name(), report.stayed);
+            }
+        }
+
+        report.lastRaw = new float[] { x, y, z };
+        report.lastJoint = new Vector3f(jointAt);
+
+        if (!report.live) {
+            return null;
+        }
+
+        // Against the tool joint: the report is in the model's units, and
+        // its sideways number may come turned round, which the model's own
+        // hand settles once and for all.
+        Vector3f turned = new Vector3f(-x / 16.0F, y / 16.0F, z / 16.0F);
+        Vector3f plain = new Vector3f(x / 16.0F, y / 16.0F, z / 16.0F);
+        float gapTurned = turned.distance(jointAt);
+        float gapPlain = plain.distance(jointAt);
+
+        if (this.reportedSign == 0 && Math.abs(gapTurned - gapPlain) > 0.05F) {
+            int vote = gapTurned < gapPlain ? -1 : 1;
+            this.reportedAgreed = vote == this.reportedVote ? this.reportedAgreed + 1 : 1;
+            this.reportedVote = vote;
+
+            if (this.reportedAgreed >= REPORTED_VOTES) {
+                this.reportedSign = vote;
+            }
+        }
+
+        int sign = this.reportedSign != 0 ? this.reportedSign : gapTurned <= gapPlain ? -1 : 1;
+        Vector3f chosen = sign < 0 ? turned : plain;
+        float gap = chosen.distance(jointAt);
+        boolean sameHand = gap <= SAME_HAND;
+
+        if (!sameHand) {
+            // The model's own space was left behind by the joints - an
+            // animation carrying the body - or the bone was not drawn.
+            this.framesLeftBehind++;
+            this.worstLeftBehind = Math.max(this.worstLeftBehind, gap);
+        }
+
+        // Every number of it, now and then, so that a report that fits
+        // and one that does not can be told apart from the log.
+        long now = System.nanoTime();
+
+        if (com.argorice.epicysm.client.Diag.on() && now - this.lastNumbersLine > 1_000_000_000L) {
+            this.lastNumbersLine = now;
+            float[] carry = this.lastCarry;
+            YsmPoseSolver ready = this.solver;
+            Vector3f rootShift = ready == null ? null : ready.rootTravel();
+            com.argorice.epicysm.client.Diag.info("Items: {} reported at {} {} {} (raw), read as {} {} {}; the tool joint is at"
+                    + " {} {} {}; {} blocks apart{}; the body carried by {}; the root travelled {} in the solver",
+                    bone.name(), f(x), f(y), f(z), f(chosen.x), f(chosen.y), f(chosen.z), f(jointAt.x), f(jointAt.y), f(jointAt.z),
+                    f(gap), sameHand ? "" : " - not the same hand, left out",
+                    carry == null ? "nothing" : f(carry[0]) + " " + f(carry[1]) + " " + f(carry[2]) + " (scale " + f(carry[4]) + ")",
+                    rootShift == null ? "?" : f(rootShift.x) + " " + f(rootShift.y) + " " + f(rootShift.z) + " units");
+        }
+
+        return sameHand ? chosen : null;
+    }
+
+    private long lastNumbersLine;
+
+    private static String f(float value) {
+        return String.format(Locale.ROOT, "%.3f", value);
+    }
+
+    /** The log: once that the hand is in use, and now and then how far the tool joint was from it. */
+    private void noteGlue(Vector3f toolJoint, Vector3f hand) {
+        float gap = toolJoint.distance(hand);
+        this.worstGap = Math.max(this.worstGap, gap);
+        long now = System.nanoTime();
+
+        if (!this.saidReported) {
+            this.saidReported = true;
+            this.lastReportLine = now;
+            EpicYsm.LOGGER.info("Items: the held item is now put where Yes Steve Model drew the hand (sideways number {});"
+                    + " this frame the solver's tool joint was {} blocks from it",
+                    this.reportedSign < 0 ? "turned round" : this.reportedSign > 0 ? "as is" : "not settled yet",
+                    String.format(Locale.ROOT, "%.3f", gap));
+            return;
+        }
+
+        if (now - this.lastReportLine > 30_000_000_000L) {
+            this.lastReportLine = now;
+            float[] carry = this.lastCarry;
+            EpicYsm.LOGGER.info("Items: the held item sits where Yes Steve Model drew the hand; the solver's tool joint was {}"
+                    + " blocks from it this frame, at worst {} so far. {} frame(s) the report lay too far from the joint"
+                    + " to be used (up to {} blocks) and the item stayed on the joint; the body was carried by {} this frame",
+                    String.format(Locale.ROOT, "%.3f", gap), String.format(Locale.ROOT, "%.3f", this.worstGap),
+                    this.framesLeftBehind, String.format(Locale.ROOT, "%.3f", this.worstLeftBehind),
+                    carry == null ? "nothing" : String.format(Locale.ROOT, "%.3f %.3f %.3f (scale %.2f)", carry[0], carry[1], carry[2], carry[4]));
+        }
     }
 
     /** Where the tool joint actually is, for the log - not how far it moved. */
@@ -2122,11 +2469,85 @@ public final class YsmSkeletonOverlay {
 
             rows.sort(String::compareTo);
             out.addAll(rows);
+            out.addAll(this.describeSkeleton(model));
             java.nio.file.Files.write(file, out, java.nio.charset.StandardCharsets.UTF_8);
-            com.argorice.epicysm.client.Diag.info("Wrote how this mod reads the model's {} bone(s) to {}", everyBone.size(), file);
+
+            // The same into the log, whole: a model that comes out wrong is
+            // then understood from the log alone.
+            EpicYsm.LOGGER.info("{}\n  (also written to {})", String.join("\n  ", out), file);
         } catch (Throwable t) {
             EpicYsm.LOGGER.debug("Could not write the model description", t);
         }
+    }
+
+    /**
+     * The skeleton the solver built out of the model's pivots: every joint
+     * in the model's own units, whether a bone of the model's own put it
+     * there, and the bones the hands and the items hang on.
+     */
+    private List<String> describeSkeleton(@Nullable YsmLiveSkeleton.Skeleton model) {
+        List<String> out = new ArrayList<>();
+        YsmPoseSolver ready = this.solver;
+
+        if (ready == null) {
+            out.add("No skeleton was built from this model's pivots (the solver is not ready); bones are only turned");
+            return out;
+        }
+
+        out.add(String.format(Locale.ROOT, "Skeleton built from the pivots, in model units with x to Epic Fight's right"
+                + " (the model's sideways axis %s; %.2f units per block by the head's height, drawn at %.3f;"
+                + " %d joint(s) moved to a body's proportions):",
+                ready.mirrorsX() ? "runs the other way and is mirrored" : "runs Epic Fight's way",
+                ready.unitsPerBipedBlock(), YsmPoseSolver.modelScale(), ready.repaired()));
+
+        for (Map.Entry<String, Vector3f> entry : ready.bindPlaces().entrySet()) {
+            Vector3f at = entry.getValue();
+            out.add(String.format(Locale.ROOT, "  %-10s %8.3f %8.3f %8.3f  %s", entry.getKey(), at.x, at.y, at.z,
+                    ready.sourcedJoints().contains(entry.getKey()) ? "from a bone of the model's own"
+                            : "no bone for it; taken from the biped"));
+        }
+
+        // The bones a held item hangs on, whole: where each rests next to
+        // the hand that should be holding it.
+        for (Bone bone : this.handLocators) {
+            Vector3f rest = ready.restPlaceOf(bone.name());
+            String hand = bone.name().toLowerCase(Locale.ROOT).contains("left") ? "Hand_L" : "Hand_R";
+            Vector3f handAt = ready.bindPlaces().get(hand);
+            out.add(String.format(Locale.ROOT, "Hand locator %s rests at %s%s", bone.name(),
+                    rest == null ? "?" : String.format(Locale.ROOT, "%.3f %.3f %.3f", rest.x, rest.y, rest.z),
+                    rest == null || handAt == null ? "" : String.format(Locale.ROOT, ", %.3f units from %s (%.3f %.3f %.3f)",
+                            rest.distance(handAt), hand, rest.x - handAt.x, rest.y - handAt.y, rest.z - handAt.z)));
+        }
+
+        if (!this.ownWeapons.isEmpty()) {
+            List<String> names = new ArrayList<>();
+
+            for (Bone bone : this.ownWeapons) {
+                names.add(bone.name());
+            }
+
+            out.add("Weapons of the model's own, put away in battle: " + names);
+        }
+
+        if (model != null) {
+            // Bones that hang loose - hair, tails, skirts - and what carries
+            // them, by the solver's reading.
+            List<String> carried = new ArrayList<>();
+
+            for (YsmLiveSkeleton.LiveBone bone : model.bones()) {
+                String joint = ready.boneJoints().get(bone.name().toLowerCase(Locale.ROOT));
+
+                if (joint != null && !ROLE_BY_NAME.containsKey(bone.name().toLowerCase(Locale.ROOT))) {
+                    carried.add(bone.name() + " by " + joint);
+                }
+            }
+
+            if (!carried.isEmpty()) {
+                out.add("Carried along by a joint (not posed by name): " + carried);
+            }
+        }
+
+        return out;
     }
 
     /**
@@ -2168,6 +2589,7 @@ public final class YsmSkeletonOverlay {
         described.sort(String::compareTo);
         this.ownWeapons = weapons;
         this.handLocators = locators;
+        this.forgetReports();
 
         // The hand locator is held still along with the rest.
         //
@@ -2701,7 +3123,10 @@ public final class YsmSkeletonOverlay {
         try {
             var patch = EpicFightCapabilities.getEntityPatch(player,
                     yesman.epicfight.world.capabilities.entitypatch.player.PlayerPatch.class);
-            return patch != null && patch.isEpicFightMode() && !drawingABow(player);
+            // In bed, Epic Fight's pose is one written for its own body
+            // (it stands a Yes Steve Model model on its head); the model's
+            // own sleeping animation is the right one there.
+            return patch != null && patch.isEpicFightMode() && !drawingABow(player) && !player.isSleeping();
         } catch (Throwable t) {
             return false;
         }
@@ -3135,11 +3560,9 @@ public final class YsmSkeletonOverlay {
 
     /** The rotation part of one of Epic Fight's matrices. */
     private static Quaternionf rotationOf(yesman.epicfight.api.utils.math.OpenMatrix4f matrix) {
-        Matrix3f basis = new Matrix3f(
-                matrix.m00, matrix.m01, matrix.m02,
-                matrix.m10, matrix.m11, matrix.m12,
-                matrix.m20, matrix.m21, matrix.m22);
-        return new Quaternionf().setFromNormalized(basis).normalize();
+        // The solver's reading: the turn alone, and no turn at all where
+        // the matrix has been scaled to nothing.
+        return YsmPoseSolver.rotationOf(matrix);
     }
 
     /** Which bone above this one the model actually has, closest first. */
