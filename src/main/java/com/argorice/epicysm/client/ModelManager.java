@@ -90,6 +90,8 @@ public final class ModelManager {
     private final Map<java.util.UUID, Integer> skeletonAttempts = new HashMap<>();
     /** Players Epic Fight is currently drawing itself, by tick last seen. */
     private final Map<java.util.UUID, Integer> epicFightDrew = new HashMap<>();
+    /** Players handed to another mod's renderer, behind this mod's, by tick last seen. */
+    private final Map<java.util.UUID, Integer> handedOver = new HashMap<>();
     private final Map<java.util.UUID, Boolean> yielded = new HashMap<>();
     private final java.util.List<ConvertedModel> pendingRelease = new java.util.ArrayList<>();
     private int observedFrames;
@@ -153,10 +155,27 @@ public final class ModelManager {
         this.epicFightDrew.put(player.getUUID(), player.tickCount);
     }
 
+    /** Another mod's renderer, the one behind this mod's, has just drawn this player as something else. */
+    public void noteHandedOver(AbstractClientPlayer player) {
+        this.handedOver.put(player.getUUID(), player.tickCount);
+    }
+
     /** Whether Epic Fight, not Yes Steve Model, is drawing this player. */
     public boolean epicFightDraws(AbstractClientPlayer player) {
         Integer tick = this.epicFightDrew.get(player.getUUID());
-        return tick != null && player.tickCount - tick <= FOREIGN_RENDERER_MEMORY_TICKS;
+
+        if (tick != null && player.tickCount - tick <= FOREIGN_RENDERER_MEMORY_TICKS) {
+            return true;
+        }
+
+        // A player handed to another mod - a transformation - counts only
+        // while that mod still owns the look. Remembered for a few ticks
+        // like the rest, the model came back from a transformation posed
+        // by Yes Steve Model alone for half a second before Epic Fight's
+        // animation was put on it again.
+        Integer handed = this.handedOver.get(player.getUUID());
+        return handed != null && player.tickCount - handed <= FOREIGN_RENDERER_MEMORY_TICKS
+                && com.argorice.epicysm.client.compat.LookOwners.ownsLook(player);
     }
 
     /** The live YSM renderer of the local player, for the inspector. */
@@ -243,6 +262,7 @@ public final class ModelManager {
         this.unreadableAttempts.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.probedModels.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.yielded.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.handedOver.keySet().retainAll(this.foreignRendererSeen.keySet());
     }
 
     /**
@@ -307,6 +327,13 @@ public final class ModelManager {
 
         this.unreadableAttempts.remove(player.getUUID());
         Detection detection = match.modelId().isEmpty() ? null : new Detection(match.modelId(), match.texturePath());
+
+        // Several models ship the same picture: before walking Yes Steve
+        // Model's objects for the skeleton, ask what the player actually
+        // chose - Yes Steve Model keeps the choice on the player, synced.
+        if (detection == null && !match.candidates().isEmpty()) {
+            detection = this.settleBySelection(player, match.candidates());
+        }
 
         if (detection == null && !match.candidates().isEmpty()) {
             // Walking YSM's objects costs a good fraction of a frame, so it
@@ -376,6 +403,28 @@ public final class ModelManager {
 
     /** model id -> the bone names of its geometry on disk, read once. */
     private final Map<String, java.util.Set<String>> diskBoneNames = new HashMap<>();
+
+    /** The model the player chose, by Yes Steve Model's own record of it, if it is one of those shipping the picture. */
+    @Nullable
+    private Detection settleBySelection(AbstractClientPlayer player, java.util.List<YsmTextureMatcher.Candidate> candidates) {
+        com.argorice.epicysm.client.ysm.YsmSelection.Selection chosen = com.argorice.epicysm.client.ysm.YsmSelection.of(player);
+
+        if (chosen == null) {
+            return null;
+        }
+
+        for (YsmTextureMatcher.Candidate candidate : candidates) {
+            if (candidate.modelId().equals(chosen.modelId())) {
+                com.argorice.epicysm.client.Diag.info("Several models ship this picture; Yes Steve Model records '{}' as the one"
+                        + " the player chose (texture '{}')", candidate.modelId(), chosen.texture());
+                return new Detection(candidate.modelId(), candidate.texturePath());
+            }
+        }
+
+        com.argorice.epicysm.client.Diag.info("Yes Steve Model records '{}' as the player's choice, which is none of the {} model(s)"
+                + " shipping this picture; deciding by the skeleton instead", chosen.modelId(), candidates.size());
+        return null;
+    }
 
     /** Chooses between the models that ship the very same picture. */
     @Nullable

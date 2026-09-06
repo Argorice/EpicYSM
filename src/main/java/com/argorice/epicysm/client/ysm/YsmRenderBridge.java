@@ -349,7 +349,7 @@ public final class YsmRenderBridge {
                 if (handItem() != null || loose) {
                     sayCaller();
                     this.itemSpaces.add(new org.joml.Matrix4f(this.poseStack.last().pose()));
-                    return NOWHERE;
+                    return nowhere();
                 }
 
                 // An item was drawn and it was not the one in the hand.
@@ -675,8 +675,20 @@ public final class YsmRenderBridge {
         }
     }
 
-    /** Takes vertices and does nothing with them. */
-    private static final VertexConsumer NOWHERE = new VertexConsumer() {
+    /**
+     * Takes vertices and does nothing with them. A new one each time: the
+     * item renderer draws a glinting item into two buffers at once, one
+     * for the item and one for the glint, and refuses two that are the
+     * same object ("Duplicate delegates"). One shared discard handed out
+     * for both threw inside Yes Steve Model's render, three times, and
+     * the overlay switched itself off for the rest of the session the
+     * moment an enchanted item was held.
+     */
+    private static VertexConsumer nowhere() {
+        return new Nowhere();
+    }
+
+    private static final class Nowhere implements VertexConsumer {
         @Override
         public VertexConsumer vertex(double x, double y, double z) {
             return this;
@@ -718,7 +730,7 @@ public final class YsmRenderBridge {
         @Override
         public void unsetDefaultColor() {
         }
-    };
+    }
 
     private static final class FirstVertexWatcher implements VertexConsumer {
         private final VertexConsumer delegate;
