@@ -40,3 +40,9 @@ type = "required"
 versionRange = "${ysm_version_range}"
 ordering = "AFTER"
 side = "CLIENT"
+
+# Mixins into Epic Fight's hit boxes: a box whose corners are not numbers,
+# or hung on a joint the skeleton does not have, is answered with no hit
+# instead of an exception that ends the server tick.
+[[mixins]]
+config = "epicysm.mixins.json"
