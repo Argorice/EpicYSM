@@ -1,5 +1,6 @@
 package com.argorice.epicysm.client.compat;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -9,6 +10,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import javax.annotation.Nullable;
 
 import net.minecraft.client.player.AbstractClientPlayer;
+import yesman.epicfight.api.animation.Joint;
 import yesman.epicfight.api.model.Armature;
 import yesman.epicfight.gameasset.Armatures;
 import yesman.epicfight.world.capabilities.EpicFightCapabilities;
@@ -224,7 +226,14 @@ public final class LookOwners {
         return null;
     }
 
-    /** Epic Fight's own player skeleton, by name, so that a copy of it counts too. */
+    /**
+     * Epic Fight's own player skeleton, by name, so that a copy of it counts
+     * too - and any skeleton that has every joint of it. A weapon that
+     * brings a mesh of its own (Nightfall's thorn wheel, its claws, built on
+     * Avalon) gives the player the biped with the weapon's joints added,
+     * and the biped's joints still pose the model; only a skeleton missing
+     * some of the biped's joints is another skeleton.
+     */
     private static boolean isBiped(Armature armature) {
         if (bipedName == null) {
             try {
@@ -234,7 +243,45 @@ public final class LookOwners {
             }
         }
 
-        return bipedName.equals(String.valueOf(armature));
+        return bipedName.equals(String.valueOf(armature)) || hasEveryBipedJoint(armature);
+    }
+
+    private static List<String> bipedJoints;
+
+    private static boolean hasEveryBipedJoint(Armature armature) {
+        try {
+            if (bipedJoints == null) {
+                List<String> names = new ArrayList<>();
+                gather(Armatures.BIPED.get().rootJoint, names);
+                bipedJoints = names;
+            }
+
+            if (bipedJoints.isEmpty()) {
+                return false;
+            }
+
+            for (String name : bipedJoints) {
+                if (!armature.hasJoint(name)) {
+                    return false;
+                }
+            }
+
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void gather(@Nullable Joint joint, List<String> out) {
+        if (joint == null) {
+            return;
+        }
+
+        out.add(joint.getName());
+
+        for (Joint child : joint.getSubJoints()) {
+            gather(child, out);
+        }
     }
 
     public static void forget(UUID player) {

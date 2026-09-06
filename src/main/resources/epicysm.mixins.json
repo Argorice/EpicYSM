@@ -1,0 +1,15 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.argorice.epicysm.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ColliderMixin",
+    "MultiColliderMixin",
+    "OBBColliderAccess",
+    "OBBColliderMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

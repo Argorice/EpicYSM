@@ -154,7 +154,7 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
 
             if (previous != null) {
                 this.drawingConverted = false;
-                ModelManager.get().noteEpicFightRendered(entity);
+                ModelManager.get().noteHandedOver(entity);
 
                 if (this.renderThrough(previous, entity, entitypatch, renderer, buffer, poseStack, packedLight, partialTicks)) {
                     return;

@@ -1927,6 +1927,7 @@ public final class YsmSkeletonOverlay {
             return false;
         }
 
+        ready.setRightHandInAction(inAction(patch));
         Map<String, YsmPoseSolver.Placement> placements = ready.solve(pose, this.restByName);
 
         if (placements.isEmpty()) {
@@ -1983,6 +1984,15 @@ public final class YsmSkeletonOverlay {
         }
 
         return true;
+    }
+
+    /** Whether an action - an attack, a skill, a sheathing - is playing, rather than a stance or a walk. */
+    private static boolean inAction(LivingEntityPatch<?> patch) {
+        try {
+            return patch.getEntityState().inaction();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** Continuity is kept per bone name here, not per role. */
@@ -3153,10 +3163,21 @@ public final class YsmSkeletonOverlay {
         this.writePoseNow(player, partialTicks);
 
         // Every few frames, what was left in the slots; next frame says
-        // whether Yes Steve Model wrote over it.
-        if (!this.probe && !this.keepDead && epicFightInCharge(player)
+        // whether Yes Steve Model wrote over it. Not while the game is
+        // paused: the world is still drawn behind the menu, but nothing
+        // animates, and two seconds of that read as the model no longer
+        // being drawn - it was read again on every return from the menu.
+        if (!this.probe && !this.keepDead && epicFightInCharge(player) && !paused()
                 && ++this.sinceLivenessCheck % LIVENESS_CHECK_EVERY == 0) {
             this.leftBehind = this.sampleAll();
+        }
+    }
+
+    private static boolean paused() {
+        try {
+            return net.minecraft.client.Minecraft.getInstance().isPaused();
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -3169,7 +3190,7 @@ public final class YsmSkeletonOverlay {
         float[] left = this.leftBehind;
         this.leftBehind = null;
 
-        if (left == null) {
+        if (left == null || paused()) {
             return false;
         }
 
@@ -3485,7 +3506,10 @@ public final class YsmSkeletonOverlay {
         put(world, change, Role.ROOT, "Root");
         put(world, change, Role.BODY, "Root");
         put(world, change, Role.LOWER, "Root");
-        put(world, change, Role.CHEST_LOW, "Torso");
+        // A trunk that is one bone belongs to the chest, as the solver has
+        // it: the head and the arms hang from there.
+        List<Bone> chestBones = this.bones.get(Role.CHEST);
+        put(world, change, Role.CHEST_LOW, chestBones == null || chestBones.isEmpty() ? "Chest" : "Torso");
         put(world, change, Role.CHEST, "Chest");
         put(world, change, Role.HEAD_OUTER, "Head");
         put(world, change, Role.HEAD_INNER, "Head");
