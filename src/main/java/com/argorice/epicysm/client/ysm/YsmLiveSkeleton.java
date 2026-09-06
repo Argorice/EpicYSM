@@ -33,6 +33,13 @@ public final class YsmLiveSkeleton {
     private static final int MAX_DEPTH = 16;
     private static final int MIN_BONES = 6;
 
+    /**
+     * What the name of a trunk or head bone contains, whatever a model adds
+     * around it (MHead, AllBody, Head2 for a second form): a rig with no
+     * such bone is not a body.
+     */
+    private static final List<String> TRUNK_WORDS = List.of("root", "body", "head");
+
     /** One bone as YSM holds it: name, pivot in model pixels, parent. */
     public record LiveBone(String name, float pivotX, float pivotY, float pivotZ, @Nullable String parent) {
     }
@@ -51,6 +58,27 @@ public final class YsmLiveSkeleton {
     public record Skeleton(List<LiveBone> bones, List<Object> objects, Object owner, int repeats) {
         public Skeleton(List<LiveBone> bones, List<Object> objects, Object owner) {
             this(bones, objects, owner, 0);
+        }
+
+        /**
+         * Whether this is a body at all: a bone the trunk or the head is
+         * made of. Yes Steve Model's model for the first-person view is
+         * arms alone - LeftArm, LeftForeArm, a hand locator, and the same
+         * on the right - and it hangs beside the body, under the same
+         * texture, once anything has drawn the hands in first person.
+         */
+        public boolean hasTrunk() {
+            for (LiveBone bone : this.bones) {
+                String name = bone.name().toLowerCase(Locale.ROOT);
+
+                for (String word : TRUNK_WORDS) {
+                    if (name.contains(word)) {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
         }
 
         public Set<String> names() {
@@ -107,14 +135,19 @@ public final class YsmLiveSkeleton {
             // cache and the copy built for this player. Only the second is
             // animated. The one that hangs below the object holding the
             // player's texture (or the player himself) is preferred; a plain
-            // nearest-common-ancestor distance breaks ties after that.
+            // nearest-common-ancestor distance breaks ties after that. Before
+            // any of that, a rig that is a body at all: the first-person arms
+            // hang just as close to the texture as the body does, and with
+            // shaders on they are there in the third person too.
             List<Object> holders = new ArrayList<>(found.textureHolders);
             holders.addAll(found.playerHolders);
             Skeleton best = null;
             int bestBelow = Integer.MAX_VALUE;
             int bestDistance = Integer.MAX_VALUE;
             boolean bestIsOneRig = false;
+            boolean bestHasTrunk = false;
             int copies = 0;
+            int armsAlone = 0;
 
             for (Skeleton skeleton : found.skeletons) {
                 if (rejected.contains(skeleton.owner())) {
@@ -147,9 +180,16 @@ public final class YsmLiveSkeleton {
                 // A rig has one bone called LeftArm. Something that has
                 // seven of them is not a model, it is every model Yes
                 boolean oneRig = skeleton.repeats() == 0;
+                boolean hasTrunk = skeleton.hasTrunk();
                 boolean better;
 
-                if (oneRig != bestIsOneRig) {
+                if (!hasTrunk) {
+                    armsAlone++;
+                }
+
+                if (hasTrunk != bestHasTrunk) {
+                    better = hasTrunk;
+                } else if (oneRig != bestIsOneRig) {
                     better = oneRig;
                 } else if (below != bestBelow) {
                     better = below < bestBelow;
@@ -161,15 +201,16 @@ public final class YsmLiveSkeleton {
                     bestBelow = below;
                     bestDistance = distance;
                     bestIsOneRig = oneRig;
+                    bestHasTrunk = hasTrunk;
                     best = skeleton;
                 }
             }
 
             if (best != null) {
                 com.argorice.epicysm.client.Diag.info("Live skeleton chosen for this model: {} bone(s), {} repeated name(s),"
-                        + " {} step(s) from the object holding the texture, {} below it; {} candidate(s), {} passed over",
-                        best.bones().size(), best.repeats(), bestDistance,
-                        bestBelow == Integer.MAX_VALUE ? "not" : bestBelow, copies, rejected.size());
+                        + " {} step(s) from the object holding the texture, {} below it; {} candidate(s), {} passed over,"
+                        + " {} of them arms alone", best.bones().size(), best.repeats(), bestDistance,
+                        bestBelow == Integer.MAX_VALUE ? "not" : bestBelow, copies, rejected.size(), armsAlone);
                 rememberSize(found, texture);
             }
 
