@@ -3,6 +3,7 @@ plugins {
     id 'idea'
     id 'net.minecraftforge.gradle' version '[6.0.24,6.2)'
     id 'org.parchmentmc.librarian.forgegradle' version '1.+'
+    id 'org.spongepowered.mixin' version '0.7.+'
 }
 
 version = mod_version
@@ -68,8 +69,17 @@ repositories {
 // (offline fallback, or for testing unreleased builds).
 def localEpicFight = fileTree(dir: 'local/libs', include: 'epic*fight*.jar')
 
+// Mixins into Epic Fight's hit boxes: a box whose corners are not numbers,
+// or hung on a joint the skeleton does not have, is answered with no hit
+// instead of an exception that ends the server tick.
+mixin {
+    add sourceSets.main, "epicysm.refmap.json"
+    config "epicysm.mixins.json"
+}
+
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
 
     if (!localEpicFight.isEmpty()) {
         // flatDir resolves "group:name:version" to name-version.jar, so the

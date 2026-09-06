@@ -112,10 +112,18 @@ public final class JointMapper {
     private final Set<String> hiddenBones = new HashSet<>();
     private final Map<String, BedrockGeometry.Bone> bonesByName = new HashMap<>();
 
+    /**
+     * Whether the model's trunk is one bone: an UpBody with nothing named
+     * UpperBody inside it, which is how most models are built.
+     */
+    private final boolean oneTrunk;
+
     public JointMapper(BedrockGeometry geometry, @Nullable JsonObject overrides) {
         for (BedrockGeometry.Bone bone : geometry.bones()) {
             this.bonesByName.put(bone.name(), bone);
         }
+
+        this.oneTrunk = findBoneIgnoreCase("UpperBody") == null && findBoneIgnoreCase("MUpperBody") == null;
 
         if (overrides != null) {
             if (overrides.has("bones")) {
@@ -176,7 +184,7 @@ public final class JointMapper {
             String explicit = this.boneToJoint.get(current.name().toLowerCase(Locale.ROOT));
 
             if (explicit == null) {
-                explicit = DEFAULT_BONE_TO_JOINT.get(current.name().toLowerCase(Locale.ROOT));
+                explicit = this.defaultJointFor(current.name().toLowerCase(Locale.ROOT));
             }
 
             if (explicit != null) {
@@ -187,6 +195,26 @@ public final class JointMapper {
         }
 
         return "Torso";
+    }
+
+    /**
+     * The joint a bone of this name follows by default, on this model.
+     *
+     * Epic Fight turns the body at two places, the hips and the chest, and
+     * the head and both arms hang from the chest. A model that splits its
+     * trunk in two gives each joint a bone; a model whose whole trunk is
+     * one UpBody gives the hips theirs and the chest nothing - so when an
+     * animation turned the chest, the head and the arms went with it and
+     * the body stayed where the hips left it. The one bone there is
+     * belongs to the chest then, which turns with the hips anyway.
+     */
+    @Nullable
+    private String defaultJointFor(String lowerName) {
+        if (this.oneTrunk && ("upbody".equals(lowerName) || "mupbody".equals(lowerName))) {
+            return "Chest";
+        }
+
+        return DEFAULT_BONE_TO_JOINT.get(lowerName);
     }
 
     /**

@@ -165,6 +165,16 @@ public final class EpicFightItems {
                 watch(nearest == Float.MAX_VALUE ? Float.NaN : nearest, scale, renderer.getClass().getName());
             }
 
+            // A weapon that is a mesh of its own on joints of its own is
+            // drawn in the hand by nobody: its renderer draws nothing there
+            // and the mesh comes at the end of Epic Fight's layers, which
+            // Yes Steve Model's render never reaches. Drawn here, at this
+            // model's joints, as Epic Fight draws it for the main hand.
+            if (!off) {
+                com.argorice.epicysm.client.compat.AvalonWeapons.draw(renderer, stack, patch, drawn, scale, buffers,
+                        poseStack, light, partialTicks);
+            }
+
             // With this model's own skeleton standing in for the patch's.
             //
             Armature stand = standIn(patch, joints, partialTicks);

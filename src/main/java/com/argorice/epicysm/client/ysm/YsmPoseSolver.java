@@ -121,6 +121,32 @@ public final class YsmPoseSolver {
     private final Map<String, String> namedJoint = new HashMap<>();
 
     /**
+     * Whether the model's trunk is one bone: an UpBody with nothing named
+     * UpperBody inside it, which is how most models are built.
+     */
+    private boolean oneTrunk;
+
+    /**
+     * Which joint a bone of this name follows, on this model.
+     *
+     * Epic Fight turns the body at two places, the hips and the chest, and
+     * the head and both arms hang from the chest. A model that splits its
+     * trunk in two gives each joint a bone; a model whose whole trunk is
+     * one UpBody gives the hips theirs and the chest nothing - so when an
+     * animation turned the chest, the head and the arms went with it and
+     * the body stayed where the hips left it. The one bone there is
+     * belongs to the chest then, which turns with the hips anyway.
+     */
+    @Nullable
+    private String jointNamed(String key) {
+        if (this.oneTrunk && ("upbody".equals(key) || "mupbody".equals(key))) {
+            return "Chest";
+        }
+
+        return BONE_TO_JOINT.get(key);
+    }
+
+    /**
      * Whether bones that do not say what they are - hair, skirts, coats,
      * props - are driven as well, the way the converted models drive them:
      * by the nearest name above them, or failing that by whatever joint
@@ -178,6 +204,8 @@ public final class YsmPoseSolver {
         for (YsmLiveSkeleton.LiveBone bone : skeleton.bones()) {
             this.byName.put(key(bone.name()), bone);
         }
+
+        this.oneTrunk = !this.byName.containsKey("upperbody") && !this.byName.containsKey("mupperbody");
 
         for (YsmLiveSkeleton.LiveBone bone : skeleton.bones()) {
             this.addInOrder(bone, 0);
@@ -282,7 +310,7 @@ public final class YsmPoseSolver {
                 this.boneJoint.put(key(bone.name()), joint);
             }
 
-            String own = BONE_TO_JOINT.get(key(bone.name()));
+            String own = this.jointNamed(key(bone.name()));
 
             if (own != null) {
                 this.namedJoint.put(key(bone.name()), own);
@@ -353,15 +381,41 @@ public final class YsmPoseSolver {
      * tried first, with a little hysteresis; a stance that holds the hands
      * right at that distance - a sheath at the hip beside a raised blade -
      * then switched the hand on and off every few frames.
+     *
+     * The reach is a blade's length: sheathing starts with the tip at the
+     * mouth of the sheath and the hands as far apart as the blade is long,
+     * and the sheath has to be under the tip from that first moment, not
+     * only once the hands have closed up. A band of 0.45 to 0.6 blocks left
+     * the sheath wherever the model's own arm had it for the first half of
+     * the move, and the blade slid in beside it.
      */
-    private static final float HANDS_NEAR = 0.45F;
-    private static final float HANDS_FAR = 0.6F;
+    private static final float HANDS_NEAR = 0.7F;
+    private static final float HANDS_FAR = 0.85F;
 
     /** How fast the left hand moves between its own place and the meeting place, per second. */
     private static final float HANDS_RATE = 20.0F;
 
+    /** How fast the right hand's share moves in and out, per second. */
+    private static final float RIGHT_RATE = 8.0F;
+
     private boolean handsTogether;
     private float handsWeight;
+
+    /**
+     * Whether the right hand may be moved as well as the left: only while
+     * an action is playing - a sheathing, a finisher - never in a stance
+     * or a walk, where the right arm is the animator's and stays so. In a
+     * stance the right hand was pulled in to bring the sheath within the
+     * left arm's reach, and the arm bent to do it; the sheath a little
+     * off the hilt there is nothing, and it is only ever seen sheathed.
+     */
+    private boolean rightAllowed;
+    private float rightWeight;
+
+    public void setRightHandInAction(boolean value) {
+        this.rightAllowed = value;
+    }
+
     private long handsStepped;
     private long handsTraced;
 
@@ -435,26 +489,143 @@ public final class YsmPoseSolver {
             return;
         }
 
-        // The left tool joint as the animation holds it against the right,
-        // hung off this model's right tool joint - the right hand, and the
-        // blade in it, stay exactly where they are.
+        // First the right hand, and the blade in it: where the animation
+        // holds it from the chest, at this model's chest, so that what it
+        // holds is where the animation has it against the body. An arm
+        // longer than the biped's used to carry the blade further out to
+        // the side than the animation meant, and the left hand, sent after
+        // it, had to bend the wrong way to reach the sheath there. Only
+        // during an action; in a stance or a walk the right arm is left
+        // to the animator.
+        float offRight = Float.NaN;
+        float moved = 0.0F;
+        float rightStep = RIGHT_RATE * seconds;
+        float rightGoal = this.rightAllowed ? 1.0F : 0.0F;
+
+        if (!Float.isFinite(this.rightWeight)) {
+            this.rightWeight = 0.0F;
+        }
+
+        this.rightWeight = Math.max(0.0F, Math.min(1.0F,
+                this.rightWeight + Math.max(-rightStep, Math.min(rightStep, rightGoal - this.rightWeight))));
+        float rightShare = this.handsWeight * this.rightWeight;
+        Matrix4f bipedAnchor = biped.get("Chest");
+        Matrix4f anchor = posed.get("Chest");
+
+        if (bipedAnchor == null || anchor == null) {
+            bipedAnchor = biped.get("Arm_R");
+            anchor = posed.get("Arm_R");
+        }
+
+        if (rightShare > 0.0F && bipedAnchor != null && anchor != null) {
+            Vector3f fromAnchor = bipedRight.getTranslation(new Vector3f()).sub(bipedAnchor.getTranslation(new Vector3f()));
+            Vector3f placeRight = anchor.getTranslation(new Vector3f()).add(fromAnchor);
+            Quaternionf faceRight = bipedRight.getNormalizedRotation(new Quaternionf());
+            Matrix4f holdRight = new Matrix4f().translation(placeRight).rotate(faceRight);
+
+            // Both hands are moved together, as one thing, when one arm
+            // cannot reach its place and the other has reach to spare:
+            // towards the shoulder of the arm that falls short, by as much
+            // as the other has spare. A model with narrow shoulders holds
+            // the sheath, against the blade, a shoulder's width past where
+            // the left arm reaches; the pair gives way towards that arm,
+            // and the right arm bends a little more to keep hold of it.
+            // Where the pair sits matters less than the blade being in the
+            // sheath.
+            Vector3f shift = this.balance(posed, placeRight, new Matrix4f(holdRight).mul(relation).getTranslation(new Vector3f()));
+
+            if (shift != null) {
+                moved = shift.length();
+                holdRight = new Matrix4f().translation(placeRight.add(shift)).rotate(faceRight);
+            }
+
+            Matrix4f wantRight = between(right, holdRight, rightShare);
+            offRight = this.reachArm(posed, "R", wantRight);
+            right = posed.get("Tool_R");
+        }
+
+        // Then the left tool joint as the animation holds it against the
+        // right, hung off this model's right tool joint where it now is.
         Matrix4f meetLeft = new Matrix4f(right).mul(relation);
         Matrix4f wantLeft = between(left, meetLeft, this.handsWeight);
         float offLeft = this.reachArm(posed, "L", wantLeft);
 
         // Said once when the hands first meet, then now and then while
-        // they are together - so that the log shows the left hand being
-        // brought to the right one, and how far it fell short.
+        // they are together - so that the log shows the hands being
+        // brought together, and how far each fell short.
         long since = com.argorice.epicysm.client.Diag.on() ? 1_000_000_000L : 30_000_000_000L;
 
         if (!this.saidHands || now - this.handsTraced > since) {
             this.handsTraced = now;
-            EpicYsm.LOGGER.info("Hands: {} the animation holds the hands {} blocks apart, so the left hand is brought"
-                    + " onto what the right one holds (weight {}); it fell {} units short",
+            EpicYsm.LOGGER.info("Hands: {} the animation holds the hands {} blocks apart, so the left hand is brought onto"
+                    + " what the right one holds (weight {}) and, in an action, the right to where the animation holds it (weight {});"
+                    + " the pair moved {} units so both arms reach; the right fell {} units short, the left {}",
                     this.saidHands ? "still:" : "first time:", String.format(Locale.ROOT, "%.2f", apart),
-                    String.format(Locale.ROOT, "%.2f", this.handsWeight), String.format(Locale.ROOT, "%.2f", offLeft));
+                    String.format(Locale.ROOT, "%.2f", this.handsWeight), String.format(Locale.ROOT, "%.2f", rightShare),
+                    String.format(Locale.ROOT, "%.2f", moved),
+                    Float.isNaN(offRight) ? "-" : String.format(Locale.ROOT, "%.2f", offRight),
+                    String.format(Locale.ROOT, "%.2f", offLeft));
             this.saidHands = true;
         }
+    }
+
+    /**
+     * How far to move a pair of places, one for each hand, so that both
+     * arms reach theirs: null when both already do, or neither can.
+     */
+    @Nullable
+    private Vector3f balance(Map<String, Matrix4f> posed, Vector3f placeRight, Vector3f placeLeft) {
+        float shortRight = this.shortBy(posed, "R", placeRight);
+        float shortLeft = this.shortBy(posed, "L", placeLeft);
+
+        if (!Float.isFinite(shortRight) || !Float.isFinite(shortLeft) || shortRight <= 0.0F && shortLeft <= 0.0F
+                || shortRight > 0.0F && shortLeft > 0.0F) {
+            return null;
+        }
+
+        boolean rightShort = shortRight > 0.0F;
+        Matrix4f arm = posed.get(rightShort ? "Arm_R" : "Arm_L");
+
+        if (arm == null) {
+            return null;
+        }
+
+        // Towards the shoulder of the arm that falls short. The other arm
+        // is asked for at most what it has spare, so it still reaches.
+        Vector3f towards = arm.getTranslation(new Vector3f()).sub(rightShort ? placeRight : placeLeft);
+
+        if (towards.lengthSquared() < 1.0e-8F) {
+            return null;
+        }
+
+        float amount = Math.min(rightShort ? shortRight : shortLeft, rightShort ? -shortLeft : -shortRight);
+        return amount > 1.0e-4F ? towards.normalize().mul(amount) : null;
+    }
+
+    /** How far past an arm's full reach a place is, in units; negative for the reach to spare. */
+    private float shortBy(Map<String, Matrix4f> posed, String side, Vector3f place) {
+        Matrix4f arm = posed.get("Arm_" + side);
+        float reach = this.reach(posed, side);
+
+        if (arm == null || !Float.isFinite(reach)) {
+            return Float.NaN;
+        }
+
+        return place.distance(arm.getTranslation(new Vector3f())) - reach;
+    }
+
+    /** An arm's full length, shoulder to elbow to hand, in the units of the skeleton given. */
+    private float reach(Map<String, Matrix4f> joints, String side) {
+        Matrix4f arm = joints.get("Arm_" + side);
+        Matrix4f hand = joints.get("Hand_" + side);
+        Matrix4f tool = joints.get("Tool_" + side);
+
+        if (arm == null || hand == null || tool == null) {
+            return Float.NaN;
+        }
+
+        Vector3f elbow = hand.getTranslation(new Vector3f());
+        return arm.getTranslation(new Vector3f()).distance(elbow) + elbow.distance(tool.getTranslation(new Vector3f()));
     }
 
     private boolean saidHands;
@@ -470,6 +641,7 @@ public final class YsmPoseSolver {
      * Two bones reaching for a frame: the upper arm from the shoulder to
      * the elbow, the forearm from the elbow to the hand; the hand then
      * faces the way asked. Returns how far short the hand fell, in units.
+     *
      */
     private float reachArm(Map<String, Matrix4f> posed, String side, Matrix4f want) {
         String armName = "Arm_" + side;
@@ -663,6 +835,20 @@ public final class YsmPoseSolver {
         return this.restWorld(bone).transformPosition(this.pivotOf(bone));
     }
 
+    /**
+     * The bones whose own turn is left out of the rest: the arms.
+     *
+     * Most models stand with the arms turned a little out from the body,
+     * and Epic Fight's skeleton hangs them straight. A bone keeps its rest
+     * relative to the joint that carries it, so that turn stayed on the
+     * arm in every pose: the hand held its item at an angle to the blade,
+     * and the whole arm was carried out to the side. Left out, the arms
+     * follow the joints as Epic Fight's own do, straight from the shoulder,
+     * and the hands line up with what they hold.
+     */
+    private static final java.util.Set<String> STRAIGHT = java.util.Set.of(
+            "arm", "leftarm", "rightarm", "leftforearm", "rightforearm", "lefthand", "righthand");
+
     /** The whole resting frame of a bone, turn and place together. */
     private Matrix4f restWorld(YsmLiveSkeleton.LiveBone bone) {
         Matrix4f world = new Matrix4f();
@@ -676,7 +862,8 @@ public final class YsmPoseSolver {
 
         for (YsmLiveSkeleton.LiveBone link : chain) {
             Vector3f pivot = this.pivotOf(link);
-            float[] rest = this.restRotations.getOrDefault(key(link.name()), ZERO);
+            String name = key(link.name());
+            float[] rest = STRAIGHT.contains(name) ? ZERO : this.restRotations.getOrDefault(name, ZERO);
             world.translate(pivot.x, pivot.y, pivot.z)
                     .rotate(bedrock(rest))
                     .translate(-pivot.x, -pivot.y, -pivot.z);
@@ -737,7 +924,7 @@ public final class YsmPoseSolver {
         String inherited = null;
 
         for (int step = 0; at != null && step < 32; step++) {
-            inherited = BONE_TO_JOINT.get(key(at.name()));
+            inherited = this.jointNamed(key(at.name()));
 
             if (inherited != null) {
                 break;
