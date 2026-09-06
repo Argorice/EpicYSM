@@ -617,6 +617,17 @@ public final class YsmSkeletonOverlay {
         // Finding the live skeleton used to be done here, by walking out
         // from the texture Yes Steve Model was drawing with. It kept coming
         YsmLiveSkeleton.Skeleton model = YsmLiveSkeleton.readFor(player, renderer, texture, this.deadCopies);
+
+        // Arms alone - the model Yes Steve Model draws in the first person,
+        // which is all there is until the body has been drawn once. Not a
+        // skeleton to pose; the body is looked for again, as when nothing
+        // was found at all.
+        if (model != null && !model.hasTrunk()) {
+            com.argorice.epicysm.client.Diag.info("Skeleton overlay: the skeleton found for this texture is arms alone ({} bone(s)),"
+                    + " the first-person hands; the body is not there yet, looking again", model.bones().size());
+            model = null;
+        }
+
         List<Object> live = model == null ? List.of() : model.objects();
         this.chosenModel = model == null ? null : model.owner();
 
