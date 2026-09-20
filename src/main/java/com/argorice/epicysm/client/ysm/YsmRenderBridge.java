@@ -9,12 +9,12 @@ import java.util.Set;
 
 import javax.annotation.Nullable;
 
-import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.entity.EntityRenderer;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraftforge.client.event.RenderLivingEvent;
 
 import yesman.epicfight.api.animation.Joint;
@@ -30,7 +30,11 @@ import com.argorice.epicysm.EpicYsm;
 /** Opens a window inside Yes Steve Model's own render call. */
 public final class YsmRenderBridge {
     private static boolean inside;
+    /** The body being drawn through Yes Steve Model right now, while inside. */
+    @Nullable
+    private static LivingEntity drawn;
     private static boolean disabled;
+    private static boolean saidPutBack;
     private static int rendersWithoutWindow;
 
     /** Renders that ended in an exception; a few are forgiven, more are not. */
@@ -52,16 +56,49 @@ public final class YsmRenderBridge {
         failures = 0;
     }
 
+    /**
+     * True while a body is being drawn through Yes Steve Model's own
+     * renderer from here - the nested pass. Epic Fight's render hook stays
+     * out of that pass: it would take the body over a second time, with its
+     * own model, or cancel the pass and leave nothing drawn.
+     */
+    public static boolean inside() {
+        return inside;
+    }
+
+    /**
+     * Whether this is the nested pass for this very body: the render event
+     * Yes Steve Model posts before it draws, from inside this mod's draw.
+     * Cancelled there - by Epic Fight's hook, when the mixin that keeps it
+     * out is not in place - the draw is put back by the caller; whatever
+     * the hook drew meanwhile went into the window and nowhere.
+     */
+    public static boolean drawing(LivingEntity entity) {
+        return inside && drawn == entity;
+    }
+
+    /** Said once: the mixin did not take and the fallback carried the draw. */
+    public static void notePutBack(LivingEntity entity) {
+        if (!saidPutBack) {
+            saidPutBack = true;
+            EpicYsm.LOGGER.info("Compatibility: inside this mod's own draw of {} through Yes Steve Model, the render event Yes"
+                    + " Steve Model posts was cancelled - Epic Fight's render hook took the body over a second time"
+                    + " (the mixin meant to keep it out is not in place). What it drew went nowhere, and the draw"
+                    + " was put back.", YsmSkeletonOverlay.nameOf(entity));
+        }
+    }
+
     private YsmRenderBridge() {
     }
 
     /**
      * Re-runs the foreign render with the window in place. Returns true when
      * the event was taken over, in which case the caller must not do anything
-     * else with it.
+     * else with it. The entity is a player, or a maid wearing a Yes Steve
+     * Model model that Epic Fight: Touhou Little Maid has fighting.
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public static boolean intercept(RenderLivingEvent.Pre<?, ?> event, AbstractClientPlayer player,
+    public static boolean intercept(RenderLivingEvent.Pre<?, ?> event, LivingEntity player,
                                     ResourceLocation texture, boolean yieldingToYsm) {
         if (inside || disabled) {
             // The nested pass: let it run untouched, this is YSM drawing.
@@ -112,7 +149,9 @@ public final class YsmRenderBridge {
 
         if (carry != null && carry[3] < VANISHED && carry[4] < VANISHED && carry[5] < VANISHED) {
             event.setCanceled(true);
-            com.argorice.epicysm.client.compat.LookOwners.hiddenByAnimation(player, renderer);
+            if (player instanceof net.minecraft.client.player.AbstractClientPlayer clientPlayer) {
+                com.argorice.epicysm.client.compat.LookOwners.hiddenByAnimation(clientPlayer, renderer);
+            }
             return true;
         }
 
@@ -132,6 +171,7 @@ public final class YsmRenderBridge {
 
         event.setCanceled(true);
         inside = true;
+        drawn = player;
 
         // While Epic Fight holds the weapon, Yes Steve Model must not draw
         // it as well. Its render reads the hands straight off the player, so
@@ -144,8 +184,19 @@ public final class YsmRenderBridge {
 
         try {
             float yaw = Mth.rotLerp(partialTicks, player.yRotO, player.getYRot());
-            ((EntityRenderer) renderer).render(player, yaw, partialTicks, event.getPoseStack(), window,
-                    event.getPackedLight());
+
+            // A maid is drawn through the entry Touhou Little Maid draws
+            // her through; the renderer's plain render() is a vanilla body.
+            java.lang.reflect.Method entry = player instanceof net.minecraft.world.entity.player.Player ? null
+                    : com.argorice.epicysm.client.compat.LittleMaids.drawEntryOf(renderer);
+
+            if (entry != null) {
+                com.argorice.epicysm.client.compat.LittleMaids.draw(entry, renderer, player, yaw, partialTicks,
+                        event.getPoseStack(), window, event.getPackedLight());
+            } else {
+                ((EntityRenderer) renderer).render(player, yaw, partialTicks, event.getPoseStack(), window,
+                        event.getPackedLight());
+            }
         } catch (Throwable t) {
             // Whatever it pushed before failing is still on the stack, and
             // at the end of the frame that stops the game with a message
@@ -168,6 +219,7 @@ public final class YsmRenderBridge {
             return true;
         } finally {
             inside = false;
+            drawn = null;
             event.getPoseStack().popPose();
 
             if (held != null) {
@@ -203,7 +255,8 @@ public final class YsmRenderBridge {
             }
         }
 
-        if (scaleWanted && com.argorice.epicysm.client.ModelManager.get().epicFightDraws(player)) {
+        if (scaleWanted && player instanceof net.minecraft.client.player.AbstractClientPlayer clientPlayer
+                && com.argorice.epicysm.client.ModelManager.get().epicFightDraws(clientPlayer)) {
             // That was Epic Fight drawing, not Yes Steve Model.
             YsmScaleProbe.get().discard(texture);
         }
@@ -221,6 +274,10 @@ public final class YsmRenderBridge {
 
         if (window.opened) {
             rendersWithoutWindow = 0;
+        } else if (!(player instanceof net.minecraft.world.entity.player.Player)) {
+            // A maid drawn without a request from Yes Steve Model is one
+            // Touhou Little Maid did not hand over this frame; she says
+            // nothing about players.
         } else if (++rendersWithoutWindow > 60) {
             disabled = true;
             EpicYsm.LOGGER.warn("Skeleton overlay: Yes Steve Model draws this player without ever asking for a"
@@ -232,10 +289,15 @@ public final class YsmRenderBridge {
         return true;
     }
 
-    /** The two hands of a player, lifted out of the inventory and put back. */
+    /**
+     * The two hands, lifted out and put back: a player's out of the
+     * inventory, where Yes Steve Model reads them; any other body's out of
+     * its equipment slots.
+     */
     private static final class HeldItems {
         private final net.minecraft.world.item.ItemStack main;
         private final net.minecraft.world.item.ItemStack off;
+        /** The hotbar slot the main hand came out of; below zero for equipment slots. */
         private final int selected;
 
         private HeldItems(net.minecraft.world.item.ItemStack main, net.minecraft.world.item.ItemStack off, int selected) {
@@ -245,31 +307,43 @@ public final class YsmRenderBridge {
         }
 
         @Nullable
-        static HeldItems takeAway(AbstractClientPlayer player) {
+        static HeldItems takeAway(LivingEntity player) {
             try {
-                net.minecraft.world.entity.player.Inventory inventory = player.getInventory();
-                int selected = inventory.selected;
+                if (player instanceof net.minecraft.world.entity.player.Player asPlayer) {
+                    net.minecraft.world.entity.player.Inventory inventory = asPlayer.getInventory();
+                    int selected = inventory.selected;
 
-                if (selected < 0 || selected >= inventory.items.size() || inventory.offhand.isEmpty()) {
-                    return null;
+                    if (selected < 0 || selected >= inventory.items.size() || inventory.offhand.isEmpty()) {
+                        return null;
+                    }
+
+                    HeldItems held = new HeldItems(inventory.items.get(selected), inventory.offhand.get(0), selected);
+                    inventory.items.set(selected, net.minecraft.world.item.ItemStack.EMPTY);
+                    inventory.offhand.set(0, net.minecraft.world.item.ItemStack.EMPTY);
+                    return held;
                 }
 
-                HeldItems held = new HeldItems(inventory.items.get(selected), inventory.offhand.get(0), selected);
-                inventory.items.set(selected, net.minecraft.world.item.ItemStack.EMPTY);
-                inventory.offhand.set(0, net.minecraft.world.item.ItemStack.EMPTY);
+                HeldItems held = new HeldItems(player.getMainHandItem(), player.getOffhandItem(), -1);
+                player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, net.minecraft.world.item.ItemStack.EMPTY);
+                player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND, net.minecraft.world.item.ItemStack.EMPTY);
                 return held;
             } catch (Throwable t) {
                 return null;
             }
         }
 
-        void giveBack(AbstractClientPlayer player) {
+        void giveBack(LivingEntity player) {
             try {
-                net.minecraft.world.entity.player.Inventory inventory = player.getInventory();
-                inventory.items.set(this.selected, this.main);
-                inventory.offhand.set(0, this.off);
+                if (this.selected >= 0 && player instanceof net.minecraft.world.entity.player.Player asPlayer) {
+                    net.minecraft.world.entity.player.Inventory inventory = asPlayer.getInventory();
+                    inventory.items.set(this.selected, this.main);
+                    inventory.offhand.set(0, this.off);
+                } else {
+                    player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.MAINHAND, this.main);
+                    player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND, this.off);
+                }
             } catch (Throwable t) {
-                EpicYsm.LOGGER.warn("Could not put the player's held items back after Yes Steve Model's render", t);
+                EpicYsm.LOGGER.warn("Could not put the held items back after Yes Steve Model's render", t);
             }
         }
     }
@@ -289,7 +363,7 @@ public final class YsmRenderBridge {
         private static final com.mojang.blaze3d.vertex.BufferBuilder UNUSED = new com.mojang.blaze3d.vertex.BufferBuilder(256);
 
         private final MultiBufferSource delegate;
-        private final AbstractClientPlayer player;
+        private final LivingEntity player;
         private final float partialTicks;
         private final com.mojang.blaze3d.vertex.PoseStack poseStack;
         private final boolean poseWanted;
@@ -315,7 +389,7 @@ public final class YsmRenderBridge {
 
         private final ResourceLocation texture;
 
-        Window(MultiBufferSource delegate, AbstractClientPlayer player, float partialTicks,
+        Window(MultiBufferSource delegate, LivingEntity player, float partialTicks,
                com.mojang.blaze3d.vertex.PoseStack poseStack, boolean poseWanted, boolean scaleWanted,
                ResourceLocation texture) {
             super(UNUSED, java.util.Map.of());
@@ -331,7 +405,22 @@ public final class YsmRenderBridge {
 
         @Override
         public VertexConsumer getBuffer(RenderType renderType) {
-            if (!this.opened) {
+            // Epic Fight's own renderer, drawing the body from inside this
+            // draw - its hook ran on the event Yes Steve Model posts, with
+            // the mixin that keeps it out not in place - draws into nothing.
+            // Its picture of a maid is the add-on's fox with this model's
+            // texture on it, which is what this mod is here to replace.
+            if (!(this.player instanceof net.minecraft.world.entity.player.Player) && epicFightDrawing()) {
+                return nowhere();
+            }
+
+            // The first request out of Yes Steve Model's own code: the one
+            // that comes after it has animated the bones and before it
+            // draws. A player's render is Yes Steve Model's from the first
+            // request; a maid's is Touhou Little Maid's, which may draw a
+            // speech bubble of its own before it hands her to Yes Steve
+            // Model, and a pose written that early is animated over.
+            if (!this.opened && (this.player instanceof net.minecraft.world.entity.player.Player || askedByYsm())) {
                 this.opened = true;
 
                 if (this.poseWanted) {
@@ -557,7 +646,7 @@ public final class YsmRenderBridge {
      * scale it draws the body at - or null when it leaves both alone.
      */
     @Nullable
-    private static float[] bodyCarry(AbstractClientPlayer player, float partialTicks) {
+    private static float[] bodyCarry(LivingEntity player, float partialTicks) {
         try {
             LivingEntityPatch<?> patch = EpicFightCapabilities.getEntityPatch(player, LivingEntityPatch.class);
 
@@ -606,6 +695,29 @@ public final class YsmRenderBridge {
      * the safety net for the strict check below, and the counter that decides
      * when to fall back to it.
      */
+    /** Whether Epic Fight's own renderer is on the stack asking for this buffer. */
+    private static boolean epicFightDrawing() {
+        try {
+            return StackWalker.getInstance().walk(frames -> frames.limit(48).anyMatch(frame -> {
+                String name = frame.getClassName();
+                return name.startsWith("yesman.epicfight.client.renderer.")
+                        || name.startsWith("yesman.epicfight.client.events.engine.RenderEngine");
+            }));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** Whether Yes Steve Model's own code is on the stack asking for this buffer. */
+    private static boolean askedByYsm() {
+        try {
+            return StackWalker.getInstance().walk(frames -> frames.limit(48)
+                    .anyMatch(frame -> frame.getClassName().startsWith("com.elfmcys.")));
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
     private static boolean anyItemRenderer() {
         try {
             return StackWalker.getInstance().walk(frames -> frames.limit(48).anyMatch(frame -> {

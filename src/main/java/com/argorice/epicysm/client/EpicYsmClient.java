@@ -99,6 +99,7 @@ public final class EpicYsmClient {
 
         MinecraftForge.EVENT_BUS.addListener(EventPriority.HIGH, true, (RenderLivingEvent.Pre<?, ?> event) -> {
             if (!(event.getEntity() instanceof AbstractClientPlayer player)) {
+                maid(event);
                 return;
             }
 
@@ -126,6 +127,19 @@ public final class EpicYsmClient {
             }
         });
 
+        // The render event Yes Steve Model posts from inside this mod's own
+        // draw of a maid, cancelled after everyone has had their say: Epic
+        // Fight's hook took her over a second time, with the mixin meant to
+        // keep it out not in place. Its draw went into the window and
+        // nowhere; the draw is put back so that Yes Steve Model goes on.
+        MinecraftForge.EVENT_BUS.addListener(EventPriority.LOWEST, true, (RenderLivingEvent.Pre<?, ?> event) -> {
+            if (event.isCanceled() && !(event.getEntity() instanceof AbstractClientPlayer)
+                    && com.argorice.epicysm.client.ysm.YsmRenderBridge.drawing(event.getEntity())) {
+                com.argorice.epicysm.client.ysm.YsmRenderBridge.notePutBack(event.getEntity());
+                event.setCanceled(false);
+            }
+        });
+
         // A model this mod cannot convert (an encrypted .ysm) would be drawn
         // as a bare vanilla body in battle - the model would simply vanish.
         MinecraftForge.EVENT_BUS.addListener((RenderEpicFightPlayerEvent event) -> {
@@ -145,6 +159,28 @@ public final class EpicYsmClient {
         // through, where a hidden player is refused. Once every mod is in.
         modBus.addListener((net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent event) ->
                 event.enqueueWork(com.argorice.epicysm.client.ysm.YsmRenderGate::install));
+    }
+
+    /**
+     * A maid of Touhou Little Maid in a Yes Steve Model model, about to be
+     * drawn by Epic Fight through Epic Fight: Touhou Little Maid: taken
+     * over here first, the way a player in an encrypted model is, so that
+     * Yes Steve Model draws her with Epic Fight's pose. Any other entity,
+     * and any maid Epic Fight is not drawing, is left alone.
+     */
+    private static void maid(RenderLivingEvent.Pre<?, ?> event) {
+        if (event.isCanceled() || !EpicYsmConfig.skeletonOverlay()) {
+            return;
+        }
+
+        net.minecraft.world.entity.LivingEntity entity = event.getEntity();
+
+        if (!com.argorice.epicysm.client.compat.LittleMaids.fightingInYsmModel(entity)) {
+            return;
+        }
+
+        com.argorice.epicysm.client.ysm.YsmRenderBridge.intercept(event, entity,
+                com.argorice.epicysm.client.compat.LittleMaids.textureOf(event.getRenderer(), entity), true);
     }
 
     /** The texture a foreign renderer is about to draw this player with. */

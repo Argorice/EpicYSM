@@ -18,8 +18,8 @@ import java.util.Set;
 
 import javax.annotation.Nullable;
 
-import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.LivingEntity;
 
 import com.argorice.epicysm.EpicYsm;
 
@@ -100,7 +100,7 @@ public final class YsmLiveSkeleton {
      * on screen - but a first-person arm model or a second player adds
      * more, so the caller is given all of them and picks.
      */
-    public static List<Skeleton> read(@Nullable AbstractClientPlayer player, Object renderer) {
+    public static List<Skeleton> read(@Nullable LivingEntity player, Object renderer) {
         try {
             return walk(player, renderer, null).skeletons;
         } catch (Throwable t) {
@@ -111,7 +111,7 @@ public final class YsmLiveSkeleton {
 
     /** The skeleton of the model being drawn with this texture. */
     @Nullable
-    public static Skeleton readFor(@Nullable AbstractClientPlayer player, Object renderer,
+    public static Skeleton readFor(@Nullable LivingEntity player, Object renderer,
                                    @Nullable ResourceLocation texture) {
         return readFor(player, renderer, texture, Set.of());
     }
@@ -122,7 +122,7 @@ public final class YsmLiveSkeleton {
      *                 same bones); they are passed over
      */
     @Nullable
-    public static Skeleton readFor(@Nullable AbstractClientPlayer player, Object renderer,
+    public static Skeleton readFor(@Nullable LivingEntity player, Object renderer,
                                    @Nullable ResourceLocation texture, Set<Object> rejected) {
         try {
             Found found = walk(player, renderer, texture);
@@ -143,11 +143,14 @@ public final class YsmLiveSkeleton {
             holders.addAll(found.playerHolders);
             Skeleton best = null;
             int bestBelow = Integer.MAX_VALUE;
+            int bestBelowEntity = Integer.MAX_VALUE;
             int bestDistance = Integer.MAX_VALUE;
             boolean bestIsOneRig = false;
             boolean bestHasTrunk = false;
+            boolean bestIsOthersBody = false;
             int copies = 0;
             int armsAlone = 0;
+            int othersBodies = 0;
 
             for (Skeleton skeleton : found.skeletons) {
                 if (rejected.contains(skeleton.owner())) {
@@ -175,6 +178,35 @@ public final class YsmLiveSkeleton {
                     continue;
                 }
 
+                // Below the object holding this very entity, before anything
+                // holding the texture: two bodies in the same model - a
+                // player and a maid dressed alike - share the texture, and
+                // each hangs under its own entity's holder.
+                int belowEntity = Integer.MAX_VALUE;
+
+                for (Object holder : found.playerHolders) {
+                    int down = stepsBelow(found.parents, holder, skeleton.owner());
+
+                    if (down >= 0 && down < belowEntity) {
+                        belowEntity = down;
+                    }
+                }
+
+                // And below the record of some other body - another player,
+                // a maid - in the same model: that copy is theirs. It is the
+                // last choice, and it is not taken at all: written to from
+                // here as well as from its own overlay, it came apart.
+                int belowOther = Integer.MAX_VALUE;
+
+                for (Object holder : found.otherHolders) {
+                    int down = stepsBelow(found.parents, holder, skeleton.owner());
+
+                    if (down >= 0 && down < belowOther) {
+                        belowOther = down;
+                    }
+                }
+
+                boolean othersBody = belowOther != Integer.MAX_VALUE && belowOther < belowEntity;
                 copies++;
 
                 // A rig has one bone called LeftArm. Something that has
@@ -187,10 +219,18 @@ public final class YsmLiveSkeleton {
                     armsAlone++;
                 }
 
+                if (othersBody) {
+                    othersBodies++;
+                }
+
                 if (hasTrunk != bestHasTrunk) {
                     better = hasTrunk;
                 } else if (oneRig != bestIsOneRig) {
                     better = oneRig;
+                } else if (othersBody != bestIsOthersBody) {
+                    better = !othersBody;
+                } else if (belowEntity != bestBelowEntity) {
+                    better = belowEntity < bestBelowEntity;
                 } else if (below != bestBelow) {
                     better = below < bestBelow;
                 } else {
@@ -199,18 +239,30 @@ public final class YsmLiveSkeleton {
 
                 if (better) {
                     bestBelow = below;
+                    bestBelowEntity = belowEntity;
                     bestDistance = distance;
                     bestIsOneRig = oneRig;
                     bestHasTrunk = hasTrunk;
+                    bestIsOthersBody = othersBody;
                     best = skeleton;
                 }
             }
 
+            if (best != null && bestIsOthersBody) {
+                com.argorice.epicysm.client.Diag.info("Live skeleton: the only copy of this model left to take for {} hangs below"
+                        + " Yes Steve Model's record of another body ({} candidate(s), {} passed over); it is that body's"
+                        + " and is left alone", player == null ? "?" : YsmSkeletonOverlay.nameOf(player), copies, rejected.size());
+                return null;
+            }
+
             if (best != null) {
-                com.argorice.epicysm.client.Diag.info("Live skeleton chosen for this model: {} bone(s), {} repeated name(s),"
-                        + " {} step(s) from the object holding the texture, {} below it; {} candidate(s), {} passed over,"
-                        + " {} of them arms alone", best.bones().size(), best.repeats(), bestDistance,
-                        bestBelow == Integer.MAX_VALUE ? "not" : bestBelow, copies, rejected.size(), armsAlone);
+                com.argorice.epicysm.client.Diag.info("Live skeleton chosen for this model on {}: {} bone(s), {} repeated name(s),"
+                        + " {} step(s) from the object holding the texture, {} below it, {} below the object holding the"
+                        + " entity; {} candidate(s), {} passed over, {} of them arms alone, {} another body's",
+                        player == null ? "?" : YsmSkeletonOverlay.nameOf(player), best.bones().size(), best.repeats(),
+                        bestDistance, bestBelow == Integer.MAX_VALUE ? "not" : bestBelow,
+                        bestBelowEntity == Integer.MAX_VALUE ? "not" : bestBelowEntity, copies, rejected.size(), armsAlone,
+                        othersBodies);
                 rememberSize(found, texture);
             }
 
@@ -225,6 +277,8 @@ public final class YsmLiveSkeleton {
         final List<Skeleton> skeletons = new ArrayList<>();
         final List<Object> textureHolders = new ArrayList<>();
         final List<Object> playerHolders = new ArrayList<>();
+        /** Objects of Yes Steve Model's that hold some other living entity: another body's. */
+        final List<Object> otherHolders = new ArrayList<>();
         final Map<Object, Object> parents = new IdentityHashMap<>();
     }
 
@@ -268,7 +322,7 @@ public final class YsmLiveSkeleton {
         return -1;
     }
 
-    private static Found walk(@Nullable AbstractClientPlayer player, Object renderer,
+    private static Found walk(@Nullable LivingEntity player, Object renderer,
                               @Nullable ResourceLocation texture) {
         Set<Object> visited = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         Map<Object, Integer> depths = new IdentityHashMap<>();
@@ -313,6 +367,8 @@ public final class YsmLiveSkeleton {
 
             if (player != null && found.playerHolders.size() < 32 && holdsPlayer(value, player)) {
                 found.playerHolders.add(value);
+            } else if (player != null && found.otherHolders.size() < 64 && holdsOtherLiving(value, player)) {
+                found.otherHolders.add(value);
             }
 
             Skeleton skeleton = skeletonOf(value);
@@ -406,6 +462,35 @@ public final class YsmLiveSkeleton {
                     + " ruler every animation's travel and the hand's place are measured with.",
                     size[0], size[1], nearestDepth);
         }
+    }
+
+    /**
+     * Whether one of this object's own fields, of a kind that could hold
+     * this entity, holds some other living entity instead: the record Yes
+     * Steve Model keeps of another body, whose model hangs below it.
+     */
+    private static boolean holdsOtherLiving(Object value, Object player) {
+        for (Class<?> type = value.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : safeFields(type)) {
+                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()
+                        || !field.getType().isInstance(player)) {
+                    continue;
+                }
+
+                try {
+                    if (field.trySetAccessible()) {
+                        Object held = field.get(value);
+
+                        if (held instanceof LivingEntity && held != player) {
+                            return true;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        return false;
     }
 
     /** Whether one of this object's own fields is this very player. */
@@ -889,7 +974,7 @@ public final class YsmLiveSkeleton {
         return pivot;
     }
 
-    private static List<Object> seeds(@Nullable AbstractClientPlayer player, Object renderer) {
+    private static List<Object> seeds(@Nullable LivingEntity player, Object renderer) {
         List<Object> seeds = new ArrayList<>();
         seeds.add(renderer);
 

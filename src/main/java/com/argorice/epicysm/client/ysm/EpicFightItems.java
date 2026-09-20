@@ -13,7 +13,6 @@ import org.joml.Vector3f;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 
-import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
@@ -59,7 +58,7 @@ public final class EpicFightItems {
      * Draws one hand's item. The pose stack arrives as the render event
      * handed it over and leaves exactly as it came.
      */
-    public static boolean drawAt(AbstractClientPlayer player, PoseStack poseStack, MultiBufferSource buffers,
+    public static boolean drawAt(LivingEntity player, PoseStack poseStack, MultiBufferSource buffers,
                                  int light, float partialTicks, InteractionHand hand,
                                  List<Matrix4f> captured) {
         if (!own) {
@@ -179,10 +178,20 @@ public final class EpicFightItems {
             //
             Armature stand = standIn(patch, joints, partialTicks);
             Object held = stand == null ? null : swapArmature(patch, stand);
+            List<Object[]> hidden = held == null || player instanceof net.minecraft.world.entity.player.Player
+                    ? List.of() : hideArmatureMaps(patch);
 
             try {
                 renderer.renderItemInHand(stack, patch, hand, joints, buffers, poseStack, light, partialTicks);
             } finally {
+                for (Object[] entry : hidden) {
+                    try {
+                        ((java.lang.reflect.Field) entry[0]).set(patch, entry[1]);
+                    } catch (Throwable t) {
+                        EpicYsm.LOGGER.warn("Could not put a patch's own table of skeletons back", t);
+                    }
+                }
+
                 if (held != null) {
                     swapArmature(patch, (Armature) held);
                 }
@@ -211,7 +220,7 @@ public final class EpicFightItems {
     }
 
     /** Epic Fight's own player model matrix, built with the body's own yaw. */
-    static OpenMatrix4f bodySpace(AbstractClientPlayer player, LivingEntityPatch<?> patch,
+    static OpenMatrix4f bodySpace(LivingEntity player, LivingEntityPatch<?> patch,
                                          float partialTicks) {
         if (!modelMatrixFallback) {
             try {
@@ -335,6 +344,90 @@ public final class EpicFightItems {
         }
     }
 
+
+    /* ------------------------------------------------------------------
+     * A patch that keeps skeletons of its own, by weapon
+     * ------------------------------------------------------------------ */
+
+    /** The fields of each patch class that hold a table of skeletons. */
+    private static final Map<Class<?>, List<java.lang.reflect.Field>> ARMATURE_TABLES = new java.util.HashMap<>();
+    private static boolean saidTables;
+
+    /**
+     * Takes away, for the length of one draw, every table of skeletons
+     * the patch keeps by weapon, and gives back what to put where.
+     *
+     * The stand-in is put into the patch's armature field, and a renderer
+     * that asks the patch for its armature gets the stand-in - on a
+     * player. A maid of Touhou Little Maid answers that question from a
+     * table first, skeleton by weapon, and a weapon in the table (a blade
+     * in its sheath) is answered with Epic Fight's own biped, shared by
+     * every body: a renderer that skins its mesh to that (Nightfall's
+     * Yamato does, sheath and blade) drew it at the biped's proportions
+     * and on whatever pose that shared skeleton last held, not on this
+     * model's hand. With the tables out of the way for the draw, she
+     * answers with the field, where the stand-in is. Players never come
+     * here.
+     */
+    private static List<Object[]> hideArmatureMaps(LivingEntityPatch<?> patch) {
+        List<java.lang.reflect.Field> tables = ARMATURE_TABLES.computeIfAbsent(patch.getClass(), type -> {
+            List<java.lang.reflect.Field> found = new ArrayList<>();
+
+            for (Class<?> at = type; at != null && at != Object.class; at = at.getSuperclass()) {
+                for (java.lang.reflect.Field field : at.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())
+                            || java.lang.reflect.Modifier.isFinal(field.getModifiers())
+                            || !Map.class.isAssignableFrom(field.getType())) {
+                        continue;
+                    }
+
+                    try {
+                        if (!field.trySetAccessible()) {
+                            continue;
+                        }
+
+                        Object value = field.get(patch);
+
+                        if (value instanceof Map<?, ?> map && !map.isEmpty()
+                                && map.values().stream().allMatch(armature -> armature instanceof Armature)) {
+                            found.add(field);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+
+            if (!found.isEmpty() && !saidTables) {
+                saidTables = true;
+                com.argorice.epicysm.client.Diag.info("Items: {} keeps skeletons of its own by weapon ({}); they are set aside while"
+                        + " the item is drawn, so that a renderer asking for the skeleton gets this model's",
+                        type.getName(), found.stream().map(java.lang.reflect.Field::getName).toList());
+            }
+
+            return found;
+        });
+
+        if (tables.isEmpty()) {
+            return List.of();
+        }
+
+        List<Object[]> hidden = new ArrayList<>();
+
+        for (java.lang.reflect.Field field : tables) {
+            try {
+                Object value = field.get(patch);
+
+                if (value != null) {
+                    field.set(patch, java.util.Collections.emptyMap());
+                    hidden.add(new Object[] { field, value });
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return hidden;
+    }
+
     /** Puts an armature into the patch and returns the one that was there, or null if the field cannot be reached. */
     @Nullable
     private static Object swapArmature(LivingEntityPatch<?> patch, Armature armature) {
@@ -385,7 +478,7 @@ public final class EpicFightItems {
     }
 
     /** Minecraft 1.20.1 has no scale attribute; players are always drawn at one. */
-    private static float entityScale(AbstractClientPlayer player) {
+    private static float entityScale(LivingEntity player) {
         try {
             return 1.0F;
         } catch (Throwable t) {
@@ -416,7 +509,7 @@ public final class EpicFightItems {
      * the model's size, times the quarter-again for a gun, times how much
      * the item renderer shrinks that item for a hand, times the player's own
      */
-    public static float drawnSize(AbstractClientPlayer player, Matrix4f itemSpace, float screen) {
+    public static float drawnSize(LivingEntity player, Matrix4f itemSpace, float screen) {
         try {
             ItemStack main = player.getMainHandItem();
 
@@ -445,7 +538,7 @@ public final class EpicFightItems {
      * back off the matrix it was about to draw the item with.
      */
     @Nullable
-    private static Vector3f locatorPoint(AbstractClientPlayer player, ItemStack stack, boolean off, Matrix4f captured) {
+    private static Vector3f locatorPoint(LivingEntity player, ItemStack stack, boolean off, Matrix4f captured) {
         Matrix4f display = displayFrame(player, stack, off);
 
         if (display == null) {
@@ -509,7 +602,7 @@ public final class EpicFightItems {
      * the first vertex, or null for an item drawn by a custom renderer.
      */
     @Nullable
-    private static Matrix4f displayFrame(AbstractClientPlayer player, ItemStack stack, boolean off) {
+    private static Matrix4f displayFrame(LivingEntity player, ItemStack stack, boolean off) {
         try {
             net.minecraft.client.Minecraft client = net.minecraft.client.Minecraft.getInstance();
             net.minecraft.world.item.ItemDisplayContext held = off

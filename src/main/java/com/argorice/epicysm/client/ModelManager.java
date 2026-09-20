@@ -253,11 +253,40 @@ public final class ModelManager {
 
         this.foreignRendererSeen.keySet().removeIf(uuid -> level.getPlayerByUUID(uuid) == null);
 
-        for (java.util.UUID uuid : com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.players()) {
-            if (level.getPlayerByUUID(uuid) == null) {
-                com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(uuid);
+        // An overlay belongs to a player or to a maid; whichever it is, it
+        // goes when the entity is no longer in the world.
+        Set<java.util.UUID> overlaid = com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.players();
+        Set<java.util.UUID> present = new HashSet<>();
+
+        for (java.util.UUID uuid : overlaid) {
+            if (level.getPlayerByUUID(uuid) != null) {
+                present.add(uuid);
             }
         }
+
+        boolean entitiesKnown = true;
+
+        if (present.size() < overlaid.size()) {
+            try {
+                for (net.minecraft.world.entity.Entity entity : level.entitiesForRendering()) {
+                    if (overlaid.contains(entity.getUUID())) {
+                        present.add(entity.getUUID());
+                    }
+                }
+            } catch (Throwable ignored) {
+                // The entity list could not be read; nothing is forgotten this time.
+                entitiesKnown = false;
+            }
+        }
+
+        if (entitiesKnown) {
+            for (java.util.UUID uuid : overlaid) {
+                if (!present.contains(uuid)) {
+                    com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(uuid);
+                }
+            }
+        }
+
         this.foreignSignatures.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.unreadableAttempts.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.probedModels.keySet().retainAll(this.foreignRendererSeen.keySet());

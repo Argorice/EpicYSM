@@ -69,9 +69,10 @@ repositories {
 // (offline fallback, or for testing unreleased builds).
 def localEpicFight = fileTree(dir: 'local/libs', include: 'epic*fight*.jar')
 
-// Mixins into Epic Fight's hit boxes: a box whose corners are not numbers,
-// or hung on a joint the skeleton does not have, is answered with no hit
-// instead of an exception that ends the server tick.
+// Mixins into Epic Fight. Its hit boxes: a box whose corners are not
+// numbers, or hung on a joint the skeleton does not have, is answered with
+// no hit instead of an exception that ends the server tick. Its render
+// hook: kept out of a body this mod draws through Yes Steve Model.
 mixin {
     add sourceSets.main, "epicysm.refmap.json"
     config "epicysm.mixins.json"

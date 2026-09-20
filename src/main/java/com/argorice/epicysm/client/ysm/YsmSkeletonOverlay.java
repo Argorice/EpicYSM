@@ -24,9 +24,9 @@ import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
-import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.LivingEntity;
 import yesman.epicfight.api.animation.Joint;
 import yesman.epicfight.api.animation.Pose;
 import yesman.epicfight.world.capabilities.EpicFightCapabilities;
@@ -40,10 +40,15 @@ import com.argorice.epicysm.EpicYsm;
  * with an encrypted model gets his own skeleton found, measured and posed.
  */
 public final class YsmSkeletonOverlay {
+    /**
+     * One overlay per body Yes Steve Model draws, by the entity's id: a
+     * player, or a maid of Touhou Little Maid wearing a Yes Steve Model
+     * model and fighting through Epic Fight: Touhou Little Maid.
+     */
     private static final Map<UUID, YsmSkeletonOverlay> BY_PLAYER = new java.util.HashMap<>();
 
-    /** The overlay posing this player's model. */
-    public static YsmSkeletonOverlay of(AbstractClientPlayer player) {
+    /** The overlay posing this entity's model. */
+    public static YsmSkeletonOverlay of(LivingEntity player) {
         return BY_PLAYER.computeIfAbsent(player.getUUID(), id -> new YsmSkeletonOverlay());
     }
 
@@ -358,6 +363,8 @@ public final class YsmSkeletonOverlay {
 
     private Stage stage = Stage.IDLE;
     private UUID owner;
+    /** The entity's name, for the log: a player and a maid may share a model. */
+    private String ownerName = "";
     private ResourceLocation subject;
     private Map<Role, List<Bone>> bones = Map.of();
     private List<Bone> allBones = List.of();
@@ -459,9 +466,15 @@ public final class YsmSkeletonOverlay {
      */
     @Nullable
     private float[] leftBehind;
+    /** The frame the sample was taken in: the tick and the fraction of it. */
+    private long leftBehindTick;
+    private float leftBehindPartial;
+    /** Frames drawn since the sample; it is judged after a few. */
+    private int leftBehindFrames;
     private int sinceLivenessCheck;
     private int stillChecks;
     private static final int LIVENESS_CHECK_EVERY = 4;
+    private static final int LIVENESS_WINDOW_FRAMES = 4;
     private static final int STILL_CHECKS_BEFORE_REREAD = 30;
 
     /** How many times the live skeleton has been looked for and not found. */
@@ -548,7 +561,7 @@ public final class YsmSkeletonOverlay {
      * True while there is a reason to enter YSM's render through the bridge:
      * either to find the skeleton, to measure it, or to pose it.
      */
-    public boolean wants(AbstractClientPlayer player, ResourceLocation texture) {
+    public boolean wants(LivingEntity player, ResourceLocation texture) {
         if (this.stage == Stage.GIVEN_UP && player.getUUID().equals(this.owner) && sameTexture(texture, this.subject)) {
             return false;
         }
@@ -560,7 +573,7 @@ public final class YsmSkeletonOverlay {
      * Called right before Yes Steve Model draws this player. Only finds the
      * skeleton; nothing is written here, because YSM has not posed it yet.
      */
-    public void prepare(AbstractClientPlayer player, Object renderer, ResourceLocation texture) {
+    public void prepare(LivingEntity player, Object renderer, ResourceLocation texture) {
         try {
             boolean sameModel = player.getUUID().equals(this.owner) && sameTexture(texture, this.subject);
 
@@ -583,6 +596,7 @@ public final class YsmSkeletonOverlay {
 
             this.reset();
             this.owner = player.getUUID();
+            this.ownerName = nameOf(player);
             this.subject = texture;
             this.discover(player, renderer, texture);
         } catch (Throwable t) {
@@ -595,7 +609,7 @@ public final class YsmSkeletonOverlay {
      * Called from inside YSM's own render, after its animation has posed the
      * skeleton and before it draws. This is the only moment a write survives.
      */
-    public void onDraw(AbstractClientPlayer player, float partialTicks) {
+    public void onDraw(LivingEntity player, float partialTicks) {
         try {
             switch (this.stage) {
                 case MEASURING -> this.measure();
@@ -613,7 +627,7 @@ public final class YsmSkeletonOverlay {
      * 1. Finding the live skeleton
      * ------------------------------------------------------------------ */
 
-    private void discover(AbstractClientPlayer player, Object renderer, ResourceLocation texture) {
+    private void discover(LivingEntity player, Object renderer, ResourceLocation texture) {
         // Finding the live skeleton used to be done here, by walking out
         // from the texture Yes Steve Model was drawing with. It kept coming
         YsmLiveSkeleton.Skeleton model = YsmLiveSkeleton.readFor(player, renderer, texture, this.deadCopies);
@@ -969,7 +983,7 @@ public final class YsmSkeletonOverlay {
                 flat.size(), texture, candidates, nodes, byName);
     }
 
-    private List<Object> seeds(AbstractClientPlayer player, Object renderer) {
+    private List<Object> seeds(LivingEntity player, Object renderer) {
         List<Object> seeds = new ArrayList<>();
         seeds.add(renderer);
         seeds.add(player);
@@ -1572,8 +1586,8 @@ public final class YsmSkeletonOverlay {
         this.mode = Mode.TRS;
         this.stage = Stage.ACTIVE;
         EpicYsm.LOGGER.info("Skeleton overlay ACTIVE on the live rotations: {} body bone(s), written in radians"
-                + " beside the position and the scale Yes Steve Model computed. Epic Fight now poses this model.",
-                this.allBones.size());
+                + " beside the position and the scale Yes Steve Model computed. Epic Fight now poses this model"
+                + " on {}.", this.allBones.size(), this.ownerName);
         return true;
     }
 
@@ -1919,7 +1933,7 @@ public final class YsmSkeletonOverlay {
      * Puts every driven bone exactly where the solver says, turn and place
      * both. This is the path that reproduces the converted models.
      */
-    private boolean writeSolved(AbstractClientPlayer player, float partialTicks) {
+    private boolean writeSolved(LivingEntity player, float partialTicks) {
         YsmPoseSolver ready = this.solver;
 
         if (ready == null) {
@@ -2039,7 +2053,7 @@ public final class YsmSkeletonOverlay {
         return this.solver;
     }
 
-    public Map<String, Matrix4f> drawnJoints(AbstractClientPlayer player) {
+    public Map<String, Matrix4f> drawnJoints(LivingEntity player) {
         YsmPoseSolver ready = this.solver;
 
         if (ready == null || this.probe || this.dormant || this.stage != Stage.ACTIVE || this.mode != Mode.TRS
@@ -3135,19 +3149,32 @@ public final class YsmSkeletonOverlay {
 
     /** Whether Epic Fight is actually in charge of this player right now. */
     /** The same question, for the bridge. */
-    public static boolean fighting(AbstractClientPlayer player) {
+    public static boolean fighting(LivingEntity player) {
         YsmSkeletonOverlay overlay = BY_PLAYER.get(player.getUUID());
         return epicFightInCharge(player) && (overlay == null || !overlay.dormant);
     }
 
-    private static boolean epicFightInCharge(AbstractClientPlayer player) {
+    private static boolean epicFightInCharge(LivingEntity player) {
         try {
-            var patch = EpicFightCapabilities.getEntityPatch(player,
-                    yesman.epicfight.world.capabilities.entitypatch.player.PlayerPatch.class);
-            // In bed, Epic Fight's pose is one written for its own body
-            // (it stands a Yes Steve Model model on its head); the model's
-            // own sleeping animation is the right one there.
-            return patch != null && patch.isEpicFightMode() && !drawingABow(player) && !player.isSleeping();
+            if (drawingABow(player) || player.isSleeping()) {
+                // In bed, Epic Fight's pose is one written for its own body
+                // (it stands a Yes Steve Model model on its head); the
+                // model's own sleeping animation is the right one there.
+                return false;
+            }
+
+            if (player instanceof net.minecraft.world.entity.player.Player) {
+                var patch = EpicFightCapabilities.getEntityPatch(player,
+                        yesman.epicfight.world.capabilities.entitypatch.player.PlayerPatch.class);
+                return patch != null && patch.isEpicFightMode();
+            }
+
+            // Anything else - a maid - is Epic Fight's whenever its patch
+            // says Epic Fight draws it: the maid's, while she is set to
+            // fight. A player's patch is not asked this way, its answer
+            // posts an event.
+            LivingEntityPatch<?> patch = EpicFightCapabilities.getEntityPatch(player, LivingEntityPatch.class);
+            return patch != null && patch.overrideRender();
         } catch (Throwable t) {
             return false;
         }
@@ -3157,7 +3184,7 @@ public final class YsmSkeletonOverlay {
      * Whether the player is drawing a bow or loading a crossbow with the use
      * key - the vanilla way, held down.
      */
-    private static boolean drawingABow(AbstractClientPlayer player) {
+    private static boolean drawingABow(LivingEntity player) {
         if (!player.isUsingItem() || !com.argorice.epicysm.client.EpicYsmConfig.bowByYsm()) {
             return false;
         }
@@ -3166,21 +3193,53 @@ public final class YsmSkeletonOverlay {
         return !using.isEmpty() && using.getItem() instanceof net.minecraft.world.item.ProjectileWeaponItem;
     }
 
-    private void writePose(AbstractClientPlayer player, float partialTicks) {
-        if (!this.probe && this.copyNoLongerDrawn()) {
+    private void writePose(LivingEntity player, float partialTicks) {
+        if (!this.probe && this.copyNoLongerDrawn(partialTicks)) {
             return;
         }
 
         this.writePoseNow(player, partialTicks);
 
-        // Every few frames, what was left in the slots; next frame says
-        // whether Yes Steve Model wrote over it. Not while the game is
-        // paused: the world is still drawn behind the menu, but nothing
-        // animates, and two seconds of that read as the model no longer
-        // being drawn - it was read again on every return from the menu.
-        if (!this.probe && !this.keepDead && epicFightInCharge(player) && !paused()
-                && ++this.sinceLivenessCheck % LIVENESS_CHECK_EVERY == 0) {
+        if (this.probe || this.keepDead || !epicFightInCharge(player) || paused()) {
+            return;
+        }
+
+        // A sample still waiting out its frames: what this draw wrote is
+        // what the next draw is measured against.
+        if (this.leftBehind != null) {
             this.leftBehind = this.sampleAll();
+            return;
+        }
+
+        // Every few draws, what was left in the slots; the draws of the
+        // next few frames say whether Yes Steve Model wrote over it. Not
+        // while the game is paused: the world is still drawn behind the
+        // menu, but nothing animates, and two seconds of that read as the
+        // model no longer being drawn - it was read again on every return
+        // from the menu.
+        if (++this.sinceLivenessCheck % LIVENESS_CHECK_EVERY == 0) {
+            this.leftBehind = this.sampleAll();
+            this.leftBehindTick = gameTime();
+            this.leftBehindPartial = partialTicks;
+            this.leftBehindFrames = 0;
+        }
+    }
+
+    /** The entity's name as the log shows it, without the colour codes a maid's may carry. */
+    static String nameOf(LivingEntity entity) {
+        try {
+            return entity.getName().getString().replaceAll("\u00a7.", "");
+        } catch (Throwable t) {
+            return String.valueOf(entity.getUUID());
+        }
+    }
+
+    private static long gameTime() {
+        try {
+            var level = net.minecraft.client.Minecraft.getInstance().level;
+            return level == null ? 0L : level.getGameTime();
+        } catch (Throwable t) {
+            return 0L;
         }
     }
 
@@ -3197,12 +3256,31 @@ public final class YsmSkeletonOverlay {
      * for long enough to say it no longer draws it. The model is then read
      * again, the way it is after a switch.
      */
-    private boolean copyNoLongerDrawn() {
+    private boolean copyNoLongerDrawn(float partialTicks) {
         float[] left = this.leftBehind;
-        this.leftBehind = null;
 
         if (left == null || paused()) {
             return false;
+        }
+
+        // Yes Steve Model writes its animation once a frame at most - its
+        // own rate is capped, and a body is drawn more than once a frame
+        // under shaders, the shadow pass and then the world, on the one
+        // write. So one draw after the sample says nothing: a second draw
+        // of the same frame finds the slots as this overlay left them, and
+        // so does the next frame when the cap skipped it. Measured over
+        // one draw, a maid's copy read as no longer drawn whenever the
+        // draws fell so that the sample was taken in the shadow pass, and
+        // was read again, and passed over, every second. The sample is
+        // held for a few frames instead, refreshed after every write of
+        // this overlay's in between, and the copy counts as still only
+        // when nothing else wrote to it in all of them.
+        long tick = gameTime();
+
+        if (tick != this.leftBehindTick || partialTicks != this.leftBehindPartial) {
+            this.leftBehindTick = tick;
+            this.leftBehindPartial = partialTicks;
+            this.leftBehindFrames++;
         }
 
         float[] now = this.sampleAll();
@@ -3210,18 +3288,38 @@ public final class YsmSkeletonOverlay {
         if (now.length == left.length) {
             for (int i = 0; i < now.length; i++) {
                 if (Math.abs(now[i] - left[i]) > 1.0E-5F) {
+                    this.leftBehind = null;
                     this.stillChecks = 0;
                     return false;
                 }
             }
         }
 
+        if (this.leftBehindFrames < LIVENESS_WINDOW_FRAMES) {
+            return false;
+        }
+
+        this.leftBehind = null;
+
         if (++this.stillChecks < STILL_CHECKS_BEFORE_REREAD) {
             return false;
         }
 
-        EpicYsm.LOGGER.info("Skeleton overlay: Yes Steve Model has stopped animating the skeleton being posed -"
-                + " it draws this model from a newer copy now - so the model is read again");
+        // The copy that went still is passed over on the re-read. It is
+        // often still there to be found - Yes Steve Model keeps the copies
+        // its screens built, and a maid's old copy outlives her new one -
+        // and it ranks where it ranked before, so a read that could take it
+        // again took it again, found it still again, and read again, every
+        // second, with the model's whole table in the log each time round.
+        // When every copy has been passed over, the first is taken back and
+        // kept, checks and all, the same as when a model never moves.
+        if (this.chosenModel != null && this.deadCopies.size() < MAX_DEAD_COPIES) {
+            this.deadCopies.add(this.chosenModel);
+        }
+
+        EpicYsm.LOGGER.info("Skeleton overlay: Yes Steve Model has stopped animating the skeleton being posed for {} -"
+                + " it draws this model from a newer copy now - so the model is read again, this copy passed over"
+                + " ({} so far)", this.ownerName, this.deadCopies.size());
         UUID owner = this.owner;
         ResourceLocation subject = this.subject;
         this.reset();
@@ -3230,12 +3328,11 @@ public final class YsmSkeletonOverlay {
         this.stage = Stage.IDLE;
         this.searches = 0;
         this.sinceSearch = 0;
-        this.deadCopies.clear();
         this.keepDead = false;
         return true;
     }
 
-    private void writePoseNow(AbstractClientPlayer player, float partialTicks) {
+    private void writePoseNow(LivingEntity player, float partialTicks) {
         // Only the body on screen is posed; a model that has turned into
         // something else is Yes Steve Model's alone until it turns back.
         if (!this.probe && !this.formStillShown()) {
@@ -3463,7 +3560,7 @@ public final class YsmSkeletonOverlay {
      * Model skeleton.
      */
     @Nullable
-    private Map<Role, Quaternionf> epicFightPose(AbstractClientPlayer player, float partialTicks) {
+    private Map<Role, Quaternionf> epicFightPose(LivingEntity player, float partialTicks) {
         LivingEntityPatch<?> patch = EpicFightCapabilities.getEntityPatch(player, LivingEntityPatch.class);
 
         if (patch == null || patch.getAnimator() == null) {

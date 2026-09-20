@@ -58,6 +58,11 @@ Things that happen on their own:
 - Other players get the same treatment: whatever model YSM shows for them on your client is
   what fights, readable or encrypted, each with its own skeleton. A model switched
   mid-session is picked up on the spot.
+- A maid of Touhou Little Maid dressed in a Yes Steve Model model fights in it. With Epic
+  Fight: Touhou Little Maid a maid set to fight is drawn by Epic Fight, and the add-on has one
+  mesh for every maid, so a maid in a YSM model came out as that mesh with the wrong picture
+  on it. She is now drawn by Yes Steve Model with Epic Fight's pose, the way a player in an
+  encrypted model is, and Epic Fight draws the weapon in her hand.
 
 ## Settings
 
@@ -137,10 +142,6 @@ EpicYSM is a bridge between two mods that do all the heavy lifting:
 
 - **Yes Steve Model** by TartaricAcid and the YSM team - https://modrinth.com/mod/yes-steve-model
 - **Epic Fight** by Yesman (Antikythera Studios) - https://github.com/Antikythera-Studios/epicfight
-- If this mod doesn't work for you, there's an alternative:
-  https://github.com/sakuraimikoto33/YSM-EpicFight-Compat
-  It converts models into Epic Fight meshes (including decrypting
-  encrypted packages) and needs to be installed on the server too.
 
 Model files belong to their authors. EpicYSM never decrypts protected `.ysm` models.
 
