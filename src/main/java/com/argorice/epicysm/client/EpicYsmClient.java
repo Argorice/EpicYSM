@@ -17,7 +17,6 @@ import net.neoforged.neoforge.client.event.RenderLivingEvent;
 import net.neoforged.neoforge.client.settings.KeyConflictContext;
 import net.neoforged.neoforge.client.settings.KeyModifier;
 import net.neoforged.neoforge.common.NeoForge;
-import yesman.epicfight.api.client.event.EpicFightClientEventHooks;
 
 import com.argorice.epicysm.EpicYsm;
 import com.argorice.epicysm.client.command.EpicYsmCommands;
@@ -56,13 +55,13 @@ public final class EpicYsmClient {
 
         // Epic Fight posts this event after filling in its own renderers,
         // so putting the player entry here replaces the default one.
-        EpicFightClientEventHooks.Registry.ADD_PATCHED_ENTITY.registerEvent(event -> {
+        com.argorice.epicysm.client.compat.EpicFightEvents.onPatchedRenderers(modBus, slot -> {
             // Whatever held the slot before - Epic Fight's own renderer or
             // another mod's - stays reachable behind this one.
-            var before = com.argorice.epicysm.client.compat.PlayerRendererSlot.providerBefore(event);
-            com.argorice.epicysm.client.compat.PlayerRendererSlot.rememberContext(event.getContext());
-            event.addPatchedEntityRenderer(EntityType.PLAYER,
-                    entityType -> new EpicYsmPlayerRenderer(event.getContext(), entityType, before).initLayerLast(event.getContext(), entityType));
+            var before = com.argorice.epicysm.client.compat.PlayerRendererSlot.providerBefore(slot.event());
+            com.argorice.epicysm.client.compat.PlayerRendererSlot.rememberContext(slot.context());
+            slot.put(EntityType.PLAYER,
+                    entityType -> new EpicYsmPlayerRenderer(slot.context(), entityType, before).initLayerLast(slot.context(), entityType));
             EpicYsm.LOGGER.info("Replaced the patched player renderer{}", before != null ? ", keeping the one before it behind" : "");
         });
 
@@ -78,11 +77,12 @@ public final class EpicYsmClient {
         // Model is not re-rendered through the overlay either - whoever
         // hides a player from Epic Fight hides it from Yes Steve Model too.
         NeoForge.EVENT_BUS.addListener(EventPriority.HIGHEST, (RenderLivingEvent.Pre<?, ?> event) -> {
-            if (!(event.getEntity() instanceof AbstractClientPlayer player)) {
+            if (!(event.getEntity() instanceof AbstractClientPlayer player)
+                    || com.argorice.epicysm.client.ysm.YsmRenderBridge.inside()) {
                 return;
             }
 
-            com.argorice.epicysm.client.compat.PlayerRendererSlot.ensureInFront(player.tickCount);
+            com.argorice.epicysm.client.compat.PlayerRendererSlot.ensureInFront();
 
             if (com.argorice.epicysm.client.compat.LookOwners.hidden(player, event.getRenderer())) {
                 event.setCanceled(true);
@@ -90,12 +90,24 @@ public final class EpicYsmClient {
         });
 
         NeoForge.EVENT_BUS.addListener(EventPriority.HIGH, true, (RenderLivingEvent.Pre<?, ?> event) -> {
+            // The event Yes Steve Model posts from inside this mod's own
+            // draw: everything below was answered for the outer one.
+            if (com.argorice.epicysm.client.ysm.YsmRenderBridge.inside()) {
+                return;
+            }
+
             if (!(event.getEntity() instanceof AbstractClientPlayer player)) {
+                maid(event);
                 return;
             }
 
             if (event.isCanceled()) {
-                com.argorice.epicysm.client.compat.LookOwners.hiddenByAnotherMod(player, event.getRenderer());
+                // Drawn through Epic Fight by a mod that does so itself is
+                // drawn, not hidden.
+                if (!com.argorice.epicysm.client.compat.YsmGeoCompat.tookOver(player, event.getRenderer())) {
+                    com.argorice.epicysm.client.compat.LookOwners.hiddenByAnotherMod(player, event.getRenderer());
+                }
+
                 return;
             }
 
@@ -103,9 +115,13 @@ public final class EpicYsmClient {
 
             // Yes Steve Model's own render is no longer entered. Two
             // things were tried there and both are settled: its pose is not
+            // A gun in hand, a bow drawn, an emote, sleep: Yes Steve Model
+            // draws the player as out of battle, and Epic Fight is told not
+            // to (shouldYieldToYsm); nothing to step in between here.
             if (EpicYsmConfig.skeletonOverlay()
                     && !(event.getRenderer() instanceof net.minecraft.client.renderer.entity.player.PlayerRenderer)
-                    && !ModelManager.get().epicFightDraws(player)) {
+                    && !ModelManager.get().epicFightDraws(player)
+                    && !com.argorice.epicysm.client.compat.LeftToYsm.now(player)) {
                 com.argorice.epicysm.client.ysm.YsmRenderBridge.intercept(event, player,
                         textureOf(event.getRenderer(), player), ModelManager.get().shouldYieldToYsm(player));
             }
@@ -118,13 +134,22 @@ public final class EpicYsmClient {
             }
         });
 
-        // A model this mod cannot convert (an encrypted .ysm) would be drawn
-        // as a bare vanilla body in battle - the model would simply vanish.
-        EpicFightClientEventHooks.Render.VALIDATE_PLAYER_MODEL_TO_RENDER.registerEvent(event -> {
-            if (ModelManager.get().shouldYieldToYsm(event.getPlayerPatch().getOriginal())) {
-                event.setShouldRender(false);
+        // The render event Yes Steve Model posts from inside this mod's own
+        // draw of a maid, cancelled after everyone has had their say: Epic
+        // Fight's hook took her over a second time, with the mixin meant to
+        // keep it out not in place. Its draw went into the window and
+        // nowhere; the draw is put back so that Yes Steve Model goes on.
+        NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST, true, (RenderLivingEvent.Pre<?, ?> event) -> {
+            if (event.isCanceled() && !(event.getEntity() instanceof AbstractClientPlayer)
+                    && com.argorice.epicysm.client.ysm.YsmRenderBridge.drawing(event.getEntity())) {
+                com.argorice.epicysm.client.ysm.YsmRenderBridge.notePutBack(event.getEntity());
+                event.setCanceled(false);
             }
         });
+
+        // A model this mod cannot convert (an encrypted .ysm) would be drawn
+        // as a bare vanilla body in battle - the model would simply vanish.
+        com.argorice.epicysm.client.compat.EpicFightEvents.onPlayerModel(player -> ModelManager.get().shouldYieldToYsm(player));
 
         NeoForge.EVENT_BUS.addListener((RegisterClientCommandsEvent event) -> EpicYsmCommands.register(event.getDispatcher()));
 
@@ -137,6 +162,32 @@ public final class EpicYsmClient {
         // through, where a hidden player is refused. Once every mod is in.
         modBus.addListener((net.neoforged.fml.event.lifecycle.FMLClientSetupEvent event) ->
                 event.enqueueWork(com.argorice.epicysm.client.ysm.YsmRenderGate::install));
+
+        // The model folders are read and their pictures hashed while the
+        // game is still loading, off the render thread.
+        modBus.addListener((net.neoforged.fml.event.lifecycle.FMLClientSetupEvent event) -> ModelManager.get().warmUp());
+    }
+
+    /**
+     * A maid of Touhou Little Maid in a Yes Steve Model model, about to be
+     * drawn by Epic Fight through Epic Fight: Touhou Little Maid: taken
+     * over here first, the way a player in an encrypted model is, so that
+     * Yes Steve Model draws her with Epic Fight's pose. Any other entity,
+     * and any maid Epic Fight is not drawing, is left alone.
+     */
+    private static void maid(RenderLivingEvent.Pre<?, ?> event) {
+        if (event.isCanceled() || !EpicYsmConfig.skeletonOverlay()) {
+            return;
+        }
+
+        net.minecraft.world.entity.LivingEntity entity = event.getEntity();
+
+        if (!com.argorice.epicysm.client.compat.LittleMaids.fightingInYsmModel(entity)) {
+            return;
+        }
+
+        com.argorice.epicysm.client.ysm.YsmRenderBridge.intercept(event, entity,
+                com.argorice.epicysm.client.compat.LittleMaids.textureOf(event.getRenderer(), entity), true);
     }
 
     /** The texture a foreign renderer is about to draw this player with. */

@@ -135,6 +135,23 @@ public final class YsmTextureMatcher {
         return new Match("", "", true);
     }
 
+    /**
+     * Indexes every model's pictures and hashes all of them now, on whatever
+     * thread this is called from, so that nothing is left to decode when a
+     * texture is first matched. Returns how many pictures were read.
+     */
+    public int prewarm(Map<String, YsmModelSource> sources) {
+        this.ensureDimensionIndex(sources);
+        int pictures = 0;
+
+        for (Long dimensions : new ArrayList<>(this.byDimensions.keySet())) {
+            pictures += this.byDimensions.getOrDefault(dimensions, List.of()).size();
+            this.hashGroup(dimensions);
+        }
+
+        return pictures;
+    }
+
     /** Drops all indexes; rebuilt from the given sources on next use. */
     public void reset() {
         this.byDimensions = null;

@@ -18,8 +18,8 @@ import java.util.Set;
 
 import javax.annotation.Nullable;
 
-import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.LivingEntity;
 
 import com.argorice.epicysm.EpicYsm;
 
@@ -55,9 +55,13 @@ public final class YsmLiveSkeleton {
      *                every model Yes Steve Model has loaded gives itself
      *                away: one rig has one LeftArm, a bag has a dozen
      */
-    public record Skeleton(List<LiveBone> bones, List<Object> objects, Object owner, int repeats) {
+    public record Skeleton(List<LiveBone> bones, List<Object> objects, Object owner, int repeats, Set<String> listed) {
         public Skeleton(List<LiveBone> bones, List<Object> objects, Object owner) {
-            this(bones, objects, owner, 0);
+            this(bones, objects, owner, 0, Set.of());
+        }
+
+        public Skeleton(List<LiveBone> bones, List<Object> objects, Object owner, int repeats) {
+            this(bones, objects, owner, repeats, Set.of());
         }
 
         /**
@@ -100,9 +104,11 @@ public final class YsmLiveSkeleton {
      * on screen - but a first-person arm model or a second player adds
      * more, so the caller is given all of them and picks.
      */
-    public static List<Skeleton> read(@Nullable AbstractClientPlayer player, Object renderer) {
+    public static List<Skeleton> read(@Nullable LivingEntity player, Object renderer) {
         try {
-            return walk(player, renderer, null).skeletons;
+            Found found = walk(player, renderer, null);
+            sayIfSlow(found, null);
+            return found.skeletons;
         } catch (Throwable t) {
             EpicYsm.LOGGER.debug("Could not read Yes Steve Model's live skeleton", t);
             return List.of();
@@ -111,7 +117,7 @@ public final class YsmLiveSkeleton {
 
     /** The skeleton of the model being drawn with this texture. */
     @Nullable
-    public static Skeleton readFor(@Nullable AbstractClientPlayer player, Object renderer,
+    public static Skeleton readFor(@Nullable LivingEntity player, Object renderer,
                                    @Nullable ResourceLocation texture) {
         return readFor(player, renderer, texture, Set.of());
     }
@@ -122,12 +128,13 @@ public final class YsmLiveSkeleton {
      *                 same bones); they are passed over
      */
     @Nullable
-    public static Skeleton readFor(@Nullable AbstractClientPlayer player, Object renderer,
+    public static Skeleton readFor(@Nullable LivingEntity player, Object renderer,
                                    @Nullable ResourceLocation texture, Set<Object> rejected) {
         try {
             Found found = walk(player, renderer, texture);
 
             if (found.skeletons.isEmpty()) {
+                sayIfSlow(found, null);
                 return null;
             }
 
@@ -143,11 +150,14 @@ public final class YsmLiveSkeleton {
             holders.addAll(found.playerHolders);
             Skeleton best = null;
             int bestBelow = Integer.MAX_VALUE;
+            int bestBelowEntity = Integer.MAX_VALUE;
             int bestDistance = Integer.MAX_VALUE;
             boolean bestIsOneRig = false;
             boolean bestHasTrunk = false;
+            boolean bestIsOthersBody = false;
             int copies = 0;
             int armsAlone = 0;
+            int othersBodies = 0;
 
             for (Skeleton skeleton : found.skeletons) {
                 if (rejected.contains(skeleton.owner())) {
@@ -175,6 +185,35 @@ public final class YsmLiveSkeleton {
                     continue;
                 }
 
+                // Below the object holding this very entity, before anything
+                // holding the texture: two bodies in the same model - a
+                // player and a maid dressed alike - share the texture, and
+                // each hangs under its own entity's holder.
+                int belowEntity = Integer.MAX_VALUE;
+
+                for (Object holder : found.playerHolders) {
+                    int down = stepsBelow(found.parents, holder, skeleton.owner());
+
+                    if (down >= 0 && down < belowEntity) {
+                        belowEntity = down;
+                    }
+                }
+
+                // And below the record of some other body - another player,
+                // a maid - in the same model: that copy is theirs. It is the
+                // last choice, and it is not taken at all: written to from
+                // here as well as from its own overlay, it came apart.
+                int belowOther = Integer.MAX_VALUE;
+
+                for (Object holder : found.otherHolders) {
+                    int down = stepsBelow(found.parents, holder, skeleton.owner());
+
+                    if (down >= 0 && down < belowOther) {
+                        belowOther = down;
+                    }
+                }
+
+                boolean othersBody = belowOther != Integer.MAX_VALUE && belowOther < belowEntity;
                 copies++;
 
                 // A rig has one bone called LeftArm. Something that has
@@ -187,10 +226,18 @@ public final class YsmLiveSkeleton {
                     armsAlone++;
                 }
 
+                if (othersBody) {
+                    othersBodies++;
+                }
+
                 if (hasTrunk != bestHasTrunk) {
                     better = hasTrunk;
                 } else if (oneRig != bestIsOneRig) {
                     better = oneRig;
+                } else if (othersBody != bestIsOthersBody) {
+                    better = !othersBody;
+                } else if (belowEntity != bestBelowEntity) {
+                    better = belowEntity < bestBelowEntity;
                 } else if (below != bestBelow) {
                     better = below < bestBelow;
                 } else {
@@ -199,18 +246,32 @@ public final class YsmLiveSkeleton {
 
                 if (better) {
                     bestBelow = below;
+                    bestBelowEntity = belowEntity;
                     bestDistance = distance;
                     bestIsOneRig = oneRig;
                     bestHasTrunk = hasTrunk;
+                    bestIsOthersBody = othersBody;
                     best = skeleton;
                 }
             }
 
+            sayIfSlow(found, best);
+
+            if (best != null && bestIsOthersBody) {
+                com.argorice.epicysm.client.Diag.info("Live skeleton: the only copy of this model left to take for {} hangs below"
+                        + " Yes Steve Model's record of another body ({} candidate(s), {} passed over); it is that body's"
+                        + " and is left alone", player == null ? "?" : YsmSkeletonOverlay.nameOf(player), copies, rejected.size());
+                return null;
+            }
+
             if (best != null) {
-                com.argorice.epicysm.client.Diag.info("Live skeleton chosen for this model: {} bone(s), {} repeated name(s),"
-                        + " {} step(s) from the object holding the texture, {} below it; {} candidate(s), {} passed over,"
-                        + " {} of them arms alone", best.bones().size(), best.repeats(), bestDistance,
-                        bestBelow == Integer.MAX_VALUE ? "not" : bestBelow, copies, rejected.size(), armsAlone);
+                com.argorice.epicysm.client.Diag.info("Live skeleton chosen for this model on {}: {} bone(s), {} repeated name(s),"
+                        + " {} step(s) from the object holding the texture, {} below it, {} below the object holding the"
+                        + " entity; {} candidate(s), {} passed over, {} of them arms alone, {} another body's",
+                        player == null ? "?" : YsmSkeletonOverlay.nameOf(player), best.bones().size(), best.repeats(),
+                        bestDistance, bestBelow == Integer.MAX_VALUE ? "not" : bestBelow,
+                        bestBelowEntity == Integer.MAX_VALUE ? "not" : bestBelowEntity, copies, rejected.size(), armsAlone,
+                        othersBodies);
                 rememberSize(found, texture);
             }
 
@@ -225,7 +286,14 @@ public final class YsmLiveSkeleton {
         final List<Skeleton> skeletons = new ArrayList<>();
         final List<Object> textureHolders = new ArrayList<>();
         final List<Object> playerHolders = new ArrayList<>();
-        final Map<Object, Object> parents = new IdentityHashMap<>();
+        /** Objects of Yes Steve Model's that hold some other living entity: another body's. */
+        final List<Object> otherHolders = new ArrayList<>();
+        final Map<Object, Object> parents = new IdentityHashMap<>(MAX_NODES);
+        /** For each skeleton's owner: after how many objects it came up, and how deep. */
+        final Map<Object, int[]> cameUp = new IdentityHashMap<>();
+        final Map<Class<?>, int[]> kinds = new IdentityHashMap<>();
+        long nanos;
+        int nodes;
     }
 
     /** Steps down from an ancestor to a node, or -1 if it is not above it. */
@@ -268,63 +336,143 @@ public final class YsmLiveSkeleton {
         return -1;
     }
 
-    private static Found walk(@Nullable AbstractClientPlayer player, Object renderer,
+    private static Found walk(@Nullable LivingEntity player, Object renderer,
                               @Nullable ResourceLocation texture) {
-        Set<Object> visited = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
-        Map<Object, Integer> depths = new IdentityHashMap<>();
-        Deque<Object> queue = new ArrayDeque<>();
+        // What is put in line is written down with the object it was found
+        // in, the starting points apart, so that nothing is put in twice; a
+        // depth is told by counting off one round of the line after another.
+        // Nothing is put in line past the most a look reaches: the line is
+        // gone through in order, and what stands past that place is never
+        // reached. Kept of everything found, the line and the maps beside it
+        // grew to millions of objects and were most of a look's time.
         Found found = new Found();
+        Map<Object, Object> parents = found.parents;
+        Set<Object> starts = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        Deque<Object> queue = new ArrayDeque<>(1 << 12);
         Set<Object> seenOwners = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
 
         for (Object seed : seeds(player, renderer)) {
-            if (seed != null && depths.putIfAbsent(seed, 0) == null) {
+            if (seed != null && starts.add(seed)) {
                 queue.add(seed);
             }
         }
 
         int nodes = 0;
+        int depth = 0;
+        int queued = queue.size();
+        int leftThisRound = queued;
+        int nextRound = 0;
+        long started = System.nanoTime();
+        Map<Class<?>, int[]> kinds = found.kinds;
+        Class<?> lastType = null;
+        int[] lastCount = null;
 
         while (!queue.isEmpty() && nodes < MAX_NODES) {
-            Object value = queue.poll();
-
-            if (value == null || !visited.add(value)) {
-                continue;
+            if (leftThisRound == 0) {
+                depth++;
+                leftThisRound = nextRound;
+                nextRound = 0;
             }
 
+            Object value = queue.poll();
+            leftThisRound--;
             nodes++;
-            int depth = depths.getOrDefault(value, 0);
+            Class<?> type = value.getClass();
+            Kind kind = KINDS.get(type);
 
-            if (depth < MAX_DEPTH) {
-                for (Object child : childrenOf(value)) {
-                    if (child != null && !visited.contains(child) && depths.putIfAbsent(child, depth + 1) == null) {
-                        found.parents.put(child, value);
+            // Counted for the line in the log; objects of a kind come in runs.
+            if (type != lastType) {
+                lastType = type;
+                lastCount = kinds.computeIfAbsent(type, unused -> new int[1]);
+            }
+
+            lastCount[0]++;
+
+            if (queued < MAX_NODES && depth < MAX_DEPTH && (value == player || value == renderer || kind.descends())) {
+                for (Object child : childrenOf(value, kind)) {
+                    if (child != null && !KINDS.get(child.getClass()).leaf() && !starts.contains(child)
+                            && parents.putIfAbsent(child, value) == null) {
                         queue.add(child);
+                        nextRound++;
+
+                        if (++queued >= MAX_NODES) {
+                            break;
+                        }
                     }
                 }
             }
 
-            if (!isYsmClass(value.getClass())) {
+            if (!kind.ysm()) {
                 continue;
             }
 
-            if (texture != null && found.textureHolders.size() < 16 && holdsTexture(value, texture)) {
+            if (texture != null && found.textureHolders.size() < 16 && holdsTexture(value, kind, texture)) {
                 found.textureHolders.add(value);
             }
 
-            if (player != null && found.playerHolders.size() < 32 && holdsPlayer(value, player)) {
+            if (player != null && found.playerHolders.size() < 32 && holdsPlayer(value, kind, player)) {
                 found.playerHolders.add(value);
+            } else if (player != null && found.otherHolders.size() < 64 && holdsOtherLiving(value, kind, player)) {
+                found.otherHolders.add(value);
             }
 
-            Skeleton skeleton = skeletonOf(value);
+            Skeleton skeleton = skeletonOf(value, kind);
 
             // The same model object is reachable by several routes; a second
             // object with the same bones is a second copy and is kept.
             if (skeleton != null && seenOwners.add(skeleton.objects().isEmpty() ? skeleton.owner() : skeleton.objects().get(0))) {
                 found.skeletons.add(skeleton);
+                found.cameUp.put(skeleton.owner(), new int[] {nodes, depth});
             }
         }
 
+        found.nanos = System.nanoTime() - started;
+        found.nodes = nodes;
         return found;
+    }
+
+    private static int saidSlow;
+
+    /**
+     * The first eight times a session a look through Yes Steve Model's memory
+     * took long enough to be felt: how long, over how many objects, how far in
+     * the skeleton taken came up, and whose objects most of them were - what a
+     * narrower or a shorter look would have to leave out.
+     */
+    private static void sayIfSlow(Found found, @Nullable Skeleton taken) {
+        if (saidSlow >= 8 || found.nanos < 100_000_000L) {
+            return;
+        }
+
+        saidSlow++;
+        int[] takenAt = taken == null ? null : found.cameUp.get(taken.owner());
+        int first = Integer.MAX_VALUE;
+
+        for (int[] at : found.cameUp.values()) {
+            first = Math.min(first, at[0]);
+        }
+
+        String cameUp = takenAt != null
+                ? String.format(Locale.ROOT, "the skeleton taken came up %d object(s) in, %d step(s) deep, out of %d found",
+                        takenAt[0], takenAt[1], found.skeletons.size())
+                : found.skeletons.isEmpty() ? "no skeleton came up"
+                : String.format(Locale.ROOT, "%d skeleton(s) came up, the first %d object(s) in", found.skeletons.size(), first);
+        Map<String, Integer> byPackage = new java.util.HashMap<>();
+
+        for (Map.Entry<Class<?>, int[]> entry : found.kinds.entrySet()) {
+            String name = entry.getKey().getName();
+            String[] parts = name.split("\\.");
+            String where = parts.length <= 3 ? name : parts[0] + "." + parts[1] + "." + parts[2];
+            byPackage.merge(where, entry.getValue()[0], Integer::sum);
+        }
+
+        String most = byPackage.entrySet().stream()
+                .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                .limit(12)
+                .map(entry -> entry.getKey() + " " + entry.getValue())
+                .collect(java.util.stream.Collectors.joining(", "));
+        EpicYsm.LOGGER.info("Live skeleton: looking through Yes Steve Model's memory took {} ms over {} object(s){}; {}; most of them: {}",
+                found.nanos / 1_000_000L, found.nodes, found.nodes >= MAX_NODES ? " (as many as it looks at)" : "", cameUp, most);
     }
 
     /** The size Yes Steve Model draws this model at, as it has it in memory. */
@@ -370,15 +518,18 @@ public final class YsmLiveSkeleton {
                 continue;
             }
 
-            if (isYsmClass(value.getClass()) && holdsSize(value)) {
+            Kind kind = KINDS.get(value.getClass());
+
+            if (kind.ysm() && holdsSize(value)) {
                 nearest = value;
                 nearestDepth = depth;
                 continue;
             }
 
-            if (depth < 6) {
-                for (Object child : childrenOf(value)) {
-                    if (child != null && !visited.contains(child) && depths.putIfAbsent(child, depth + 1) == null) {
+            if (depth < 6 && kind.descends()) {
+                for (Object child : childrenOf(value, kind)) {
+                    if (child != null && !KINDS.get(child.getClass()).leaf() && !visited.contains(child)
+                            && depths.putIfAbsent(child, depth + 1) == null) {
                         queue.add(child);
                     }
                 }
@@ -408,21 +559,42 @@ public final class YsmLiveSkeleton {
         }
     }
 
-    /** Whether one of this object's own fields is this very player. */
-    private static boolean holdsPlayer(Object value, Object player) {
-        for (Class<?> type = value.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
-            for (Field field : safeFields(type)) {
-                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()
-                        || !field.getType().isInstance(player)) {
-                    continue;
-                }
+    /**
+     * Whether one of this object's own fields, of a kind that could hold
+     * this entity, holds some other living entity instead: the record Yes
+     * Steve Model keeps of another body, whose model hangs below it.
+     */
+    private static boolean holdsOtherLiving(Object value, Kind kind, Object player) {
+        for (Field field : kind.entityFields()) {
+            if (!field.getType().isInstance(player)) {
+                continue;
+            }
 
-                try {
-                    if (field.trySetAccessible() && field.get(value) == player) {
-                        return true;
-                    }
-                } catch (Throwable ignored) {
+            try {
+                Object held = field.get(value);
+
+                if (held instanceof LivingEntity && held != player) {
+                    return true;
                 }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        return false;
+    }
+
+    /** Whether one of this object's own fields is this very player. */
+    private static boolean holdsPlayer(Object value, Kind kind, Object player) {
+        for (Field field : kind.entityFields()) {
+            if (!field.getType().isInstance(player)) {
+                continue;
+            }
+
+            try {
+                if (field.get(value) == player) {
+                    return true;
+                }
+            } catch (Throwable ignored) {
             }
         }
 
@@ -501,19 +673,13 @@ public final class YsmLiveSkeleton {
     }
 
     /** Whether one of this object's own fields is that very texture. */
-    private static boolean holdsTexture(Object value, ResourceLocation texture) {
-        for (Class<?> type = value.getClass(); type != null && isYsmClass(type); type = type.getSuperclass()) {
-            for (Field field : safeFields(type)) {
-                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) {
-                    continue;
+    private static boolean holdsTexture(Object value, Kind kind, ResourceLocation texture) {
+        for (Field field : kind.ownReferences()) {
+            try {
+                if (texture.equals(field.get(value))) {
+                    return true;
                 }
-
-                try {
-                    if (field.trySetAccessible() && texture.equals(field.get(value))) {
-                        return true;
-                    }
-                } catch (Throwable ignored) {
-                }
+            } catch (Throwable ignored) {
             }
         }
 
@@ -525,86 +691,117 @@ public final class YsmLiveSkeleton {
      * bone objects, plus the root-to-leaf chains beside it.
      */
     @Nullable
-    private static Skeleton skeletonOf(Object model) {
-        Map<Object, String> names = new IdentityHashMap<>();
-        List<Object> ordered = new ArrayList<>();
-        List<List<Object>> chains = new ArrayList<>();
+    private static Skeleton skeletonOf(Object model, Kind kind) {
+        // Made only once a bone turns up: nearly every object looked at owns
+        // none, and a look goes through a couple of hundred thousand.
+        Map<Object, String> names = null;
+        List<Object> ordered = null;
+        List<List<Object>> chains = null;
 
-        for (Class<?> type = model.getClass(); type != null && isYsmClass(type); type = type.getSuperclass()) {
-            for (Field field : safeFields(type)) {
-                if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) {
-                    continue;
-                }
+        for (Field field : kind.containers()) {
+            Object held;
 
-                Object held;
+            try {
+                held = field.get(model);
+            } catch (Throwable ignored) {
+                continue;
+            }
 
-                try {
-                    held = field.trySetAccessible() ? field.get(model) : null;
-                } catch (Throwable ignored) {
-                    continue;
-                }
+            if (!(held instanceof Map<?, ?>) && !(held instanceof Collection<?>)) {
+                continue;
+            }
 
-                List<Object> elements = elementsOf(held);
+            List<Object> elements = elementsOf(held);
 
-                if (elements.isEmpty()) {
-                    continue;
-                }
+            if (elements.isEmpty()) {
+                continue;
+            }
 
-                List<Object> bones = new ArrayList<>();
+            List<Object> bones = new ArrayList<>();
 
-                for (Object element : elements) {
-                    if (element != null && isBone(element)) {
-                        bones.add(element);
-                    }
-                }
-
-                if (bones.isEmpty()) {
-                    // A list whose entries are themselves lists of bones is
-                    // a set of chains, and Yes Steve Model keeps three such
-                    for (Object element : elements) {
-                        List<Object> inner = elementsOf(element);
-
-                        if (inner.isEmpty()) {
-                            continue;
-                        }
-
-                        List<Object> innerBones = new ArrayList<>();
-
-                        for (Object candidate : inner) {
-                            if (candidate != null && isBone(candidate)) {
-                                innerBones.add(candidate);
-                            }
-                        }
-
-                        if (innerBones.size() == inner.size() && innerBones.size() > 1) {
-                            chains.add(innerBones);
-
-                            for (Object candidate : innerBones) {
-                                if (names.putIfAbsent(candidate, nameOf(candidate)) == null) {
-                                    ordered.add(candidate);
-                                }
-                            }
-                        }
-                    }
-
-                    continue;
-                }
-
-                if (bones.size() != elements.size()) {
-                    continue;
-                }
-
-                // A List is one root-to-leaf chain; the Map is every bone.
-                if (held instanceof Map<?, ?>) {
-                    for (Object bone : bones) {
-                        if (names.putIfAbsent(bone, nameOf(bone)) == null) {
-                            ordered.add(bone);
-                        }
-                    }
-                } else {
-                    chains.add(bones);
+            for (Object element : elements) {
+                if (element != null && isBone(element)) {
+                    bones.add(element);
                 }
             }
+
+            if (bones.isEmpty()) {
+                // A list whose entries are themselves lists of bones is
+                // a set of chains, and Yes Steve Model keeps three such
+                for (Object element : elements) {
+                    if (!(element instanceof Map<?, ?>) && !(element instanceof Collection<?>)) {
+                        continue;
+                    }
+
+                    List<Object> inner = elementsOf(element);
+
+                    if (inner.isEmpty()) {
+                        continue;
+                    }
+
+                    List<Object> innerBones = new ArrayList<>();
+
+                    for (Object candidate : inner) {
+                        if (candidate != null && isBone(candidate)) {
+                            innerBones.add(candidate);
+                        }
+                    }
+
+                    if (innerBones.size() == inner.size() && innerBones.size() > 1) {
+                        if (chains == null) {
+                            names = new IdentityHashMap<>();
+                            ordered = new ArrayList<>();
+                            chains = new ArrayList<>();
+                        }
+
+                        chains.add(innerBones);
+
+                        for (Object candidate : innerBones) {
+                            if (names.putIfAbsent(candidate, nameOf(candidate)) == null) {
+                                ordered.add(candidate);
+                            }
+                        }
+                    }
+                }
+
+                continue;
+            }
+
+            if (bones.size() != elements.size()) {
+                continue;
+            }
+
+            // Bones every one, and as many as the look takes: then there
+            // are more. The look stops at a thousand, enough to tell what
+            // a collection holds and not enough to hold a large model.
+            // One of seventeen hundred bones came out a thousand strong,
+            // a different thousand every time the game was started, and
+            // what was left out - a thigh, a head, a hand's locator -
+            // was neither posed nor held.
+            if (elements.size() >= PEEK) {
+                bones = everyBoneOf(held);
+            }
+
+            if (chains == null) {
+                names = new IdentityHashMap<>();
+                ordered = new ArrayList<>();
+                chains = new ArrayList<>();
+            }
+
+            // A List is one root-to-leaf chain; the Map is every bone.
+            if (held instanceof Map<?, ?>) {
+                for (Object bone : bones) {
+                    if (names.putIfAbsent(bone, nameOf(bone)) == null) {
+                        ordered.add(bone);
+                    }
+                }
+            } else {
+                chains.add(bones);
+            }
+        }
+
+        if (chains == null) {
+            return null;
         }
 
         // The chains alone also describe every bone, which is what a model
@@ -632,6 +829,9 @@ public final class YsmLiveSkeleton {
         List<LiveBone> bones = new ArrayList<>();
         List<Object> objects = new ArrayList<>();
         Map<String, Boolean> used = new LinkedHashMap<>();
+        // The bones whose bone above is Yes Steve Model's own word, not a
+        // guess from the name.
+        Set<String> listed = new HashSet<>();
         int repeats = 0;
         for (Object bone : ordered) {
             String name = names.get(bone);
@@ -650,12 +850,16 @@ public final class YsmLiveSkeleton {
             bones.add(new LiveBone(name, pivot[0], pivot[1], pivot[2],
                     parent == null ? null : names.get(parent)));
             objects.add(bone);
+
+            if (parent != null && names.get(parent) != null) {
+                listed.add(name);
+            }
         }
 
         List<LiveBone> whole = fillParents(bones, repeats);
 
         return whole.size() < MIN_BONES ? null
-                : new Skeleton(List.copyOf(whole), List.copyOf(objects), model, repeats);
+                : new Skeleton(List.copyOf(whole), List.copyOf(objects), model, repeats, Set.copyOf(listed));
     }
 
     /** Which bone a named bone hangs from, when Yes Steve Model does not say. */
@@ -687,12 +891,13 @@ public final class YsmLiveSkeleton {
         KNOWN_PARENTS.put("righthandlocator", new String[] { "righthand", "rightforearm" });
         KNOWN_PARENTS.put("allhead", new String[] { "upperbody", "mupperbody", "upbody" });
         KNOWN_PARENTS.put("mhead", new String[] { "allhead" });
-        KNOWN_PARENTS.put("head", new String[] { "mhead", "allhead" });
-        KNOWN_PARENTS.put("hair", new String[] { "head", "mhead", "allhead" });
-        KNOWN_PARENTS.put("face", new String[] { "head", "mhead", "allhead" });
+        KNOWN_PARENTS.put("hhead", new String[] { "allhead", "upperbody", "mupperbody", "upbody" });
+        KNOWN_PARENTS.put("head", new String[] { "mhead", "hhead", "allhead" });
+        KNOWN_PARENTS.put("hair", new String[] { "head", "mhead", "hhead", "allhead" });
+        KNOWN_PARENTS.put("face", new String[] { "head", "mhead", "hhead", "allhead" });
         KNOWN_PARENTS.put("leg", new String[] { "downbody", "allbody" });
-        KNOWN_PARENTS.put("leftleg", new String[] { "leg", "downbody", "allbody" });
-        KNOWN_PARENTS.put("rightleg", new String[] { "leg", "downbody", "allbody" });
+        KNOWN_PARENTS.put("leftleg", new String[] { "leg", "downbody", "allbody", "mallbody", "root" });
+        KNOWN_PARENTS.put("rightleg", new String[] { "leg", "downbody", "allbody", "mallbody", "root" });
         KNOWN_PARENTS.put("leftlowerleg", new String[] { "leftleg" });
         KNOWN_PARENTS.put("rightlowerleg", new String[] { "rightleg" });
         KNOWN_PARENTS.put("leftfoot", new String[] { "leftlowerleg", "leftleg" });
@@ -778,13 +983,43 @@ public final class YsmLiveSkeleton {
     }
 
     /** Map values or collection elements; nothing else is a bone holder. */
+    /** How much of a collection is looked at to see what it holds. */
+    private static final int PEEK = 1024;
+
+    /** More bones than any model has; a collection is not read past it. */
+    private static final int MOST_BONES = 65536;
+
+    /** Every bone of a collection already seen to hold nothing else. */
+    private static List<Object> everyBoneOf(@Nullable Object held) {
+        List<Object> bones = new ArrayList<>();
+
+        try {
+            Collection<?> all = held instanceof Map<?, ?> map ? map.values()
+                    : held instanceof Collection<?> collection ? collection : List.of();
+
+            for (Object element : all) {
+                if (bones.size() >= MOST_BONES) {
+                    break;
+                }
+
+                if (element != null && isBone(element)) {
+                    bones.add(element);
+                }
+            }
+        } catch (Throwable ignored) {
+            // As far as it could be read.
+        }
+
+        return bones;
+    }
+
     private static List<Object> elementsOf(@Nullable Object held) {
         List<Object> elements = new ArrayList<>();
 
         try {
             if (held instanceof Map<?, ?> map) {
                 for (Object element : map.values()) {
-                    if (elements.size() >= 1024) {
+                    if (elements.size() >= PEEK) {
                         break;
                     }
 
@@ -792,7 +1027,7 @@ public final class YsmLiveSkeleton {
                 }
             } else if (held instanceof Collection<?> collection) {
                 for (Object element : collection) {
-                    if (elements.size() >= 1024) {
+                    if (elements.size() >= PEEK) {
                         break;
                     }
 
@@ -811,9 +1046,14 @@ public final class YsmLiveSkeleton {
      * A bone as YSM shapes it: one name, a pivot in three floats, slot and
      * offset ints, and the rest rotation as a Vector3f. Deliberately a
      * shape test rather than a class name, which YSM changes every release.
+     * The shape is the class's, so it is worked out once for each class.
      */
     private static boolean isBone(Object value) {
-        if (!isYsmClass(value.getClass())) {
+        return KINDS.get(value.getClass()).bone();
+    }
+
+    private static boolean isBoneShaped(Class<?> kind) {
+        if (!isYsmClass(kind)) {
             return false;
         }
 
@@ -822,7 +1062,7 @@ public final class YsmLiveSkeleton {
         int ints = 0;
         int vectors = 0;
 
-        for (Class<?> type = value.getClass(); type != null && isYsmClass(type); type = type.getSuperclass()) {
+        for (Class<?> type = kind; type != null && isYsmClass(type); type = type.getSuperclass()) {
             for (Field field : safeFields(type)) {
                 if (Modifier.isStatic(field.getModifiers())) {
                     continue;
@@ -889,7 +1129,7 @@ public final class YsmLiveSkeleton {
         return pivot;
     }
 
-    private static List<Object> seeds(@Nullable AbstractClientPlayer player, Object renderer) {
+    private static List<Object> seeds(@Nullable LivingEntity player, Object renderer) {
         List<Object> seeds = new ArrayList<>();
         seeds.add(renderer);
 
@@ -924,11 +1164,11 @@ public final class YsmLiveSkeleton {
         return seeds;
     }
 
-    private static List<Object> childrenOf(Object value) {
+    private static List<Object> childrenOf(Object value, Kind kind) {
         List<Object> children = new ArrayList<>();
 
         try {
-            if (value instanceof Map<?, ?> map) {
+            if (kind.plain() && value instanceof Map<?, ?> map) {
                 for (Object element : map.values()) {
                     if (children.size() >= 1024) {
                         break;
@@ -940,7 +1180,7 @@ public final class YsmLiveSkeleton {
                 return children;
             }
 
-            if (value instanceof Collection<?> collection) {
+            if (kind.plain() && value instanceof Collection<?> collection) {
                 for (Object element : collection) {
                     if (children.size() >= 1024) {
                         break;
@@ -964,24 +1204,14 @@ public final class YsmLiveSkeleton {
                 return children;
             }
 
-            if (value instanceof String || value instanceof Number || value instanceof Boolean
-                    || value instanceof Character || value instanceof Enum<?> || value instanceof Class<?>
-                    || value instanceof ResourceLocation) {
+            if (kind.leaf()) {
                 return children;
             }
 
-            for (Class<?> type = value.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
-                for (Field field : safeFields(type)) {
-                    if (Modifier.isStatic(field.getModifiers()) || field.getType().isPrimitive()) {
-                        continue;
-                    }
-
-                    try {
-                        if (field.trySetAccessible()) {
-                            children.add(field.get(value));
-                        }
-                    } catch (Throwable ignored) {
-                    }
+            for (Field field : kind.references()) {
+                try {
+                    children.add(field.get(value));
+                } catch (Throwable ignored) {
                 }
             }
         } catch (Throwable ignored) {
@@ -990,17 +1220,212 @@ public final class YsmLiveSkeleton {
         return children;
     }
 
-    @Nullable
+    /**
+     * A class's own fields, made accessible where they can be, looked up once
+     * and kept. Asked anew for every object, the lookup copied the array and
+     * checked access field by field, on every one of the objects a look goes
+     * through.
+     */
+    private static final ClassValue<Field[]> FIELDS = new ClassValue<>() {
+        @Override
+        protected Field[] computeValue(Class<?> type) {
+            Field[] fields;
+
+            try {
+                fields = type.getDeclaredFields();
+            } catch (Throwable t) {
+                return new Field[0];
+            }
+
+            for (Field field : fields) {
+                try {
+                    field.trySetAccessible();
+                } catch (Throwable ignored) {
+                    // Left as it is; the readers ask again and pass it over.
+                }
+            }
+
+            return fields;
+        }
+    };
 
     private static Field[] safeFields(Class<?> type) {
-        try {
-            return type.getDeclaredFields();
-        } catch (Throwable t) {
-            return new Field[0];
-        }
+        return FIELDS.get(type);
     }
 
     private static boolean isYsmClass(Class<?> type) {
         return type != null && type.getName().startsWith(YSM_PACKAGE);
+    }
+
+    /**
+     * What a look needs to know of a class, worked out once for each. Of the
+     * 200 000 objects a look goes through, nearly all are of a few dozen
+     * classes, and asked anew for every object the same answers took most of
+     * a look's time: the fields listed and checked again, and every
+     * element of every collection sized up as a bone field by field.
+     *
+     * @param references    the fields an object of the class holds another
+     *                      object in, its own and its superclasses', that
+     *                      can be read
+     * @param ownReferences the same, from the classes of Yes Steve Model's
+     *                      alone, from the class up to the first that is not
+     * @param containers    those of the own that can hold a map or a collection
+     * @param entityFields  those of all that can hold a living entity
+     */
+    private record Kind(boolean ysm, boolean leaf, boolean descends, boolean plain, boolean bone,
+                        Field[] references, Field[] ownReferences, Field[] containers, Field[] entityFields) {
+    }
+
+    private static final ClassValue<Kind> KINDS = new ClassValue<>() {
+        @Override
+        protected Kind computeValue(Class<?> type) {
+            return kindOf(type);
+        }
+    };
+
+    private static Kind kindOf(Class<?> type) {
+        String name = type.getName();
+        boolean ysm = name.startsWith(YSM_PACKAGE);
+        List<Field> references = new ArrayList<>();
+        List<Field> own = new ArrayList<>();
+        List<Field> containers = new ArrayList<>();
+        List<Field> entities = new ArrayList<>();
+
+        if (!type.isArray()) {
+            boolean stillOwn = ysm;
+
+            for (Class<?> at = type; at != null && at != Object.class; at = at.getSuperclass()) {
+                stillOwn = stillOwn && isYsmClass(at);
+
+                for (Field field : safeFields(at)) {
+                    Class<?> held = field.getType();
+
+                    if (Modifier.isStatic(field.getModifiers()) || held.isPrimitive()) {
+                        continue;
+                    }
+
+                    boolean readable;
+
+                    try {
+                        readable = field.trySetAccessible();
+                    } catch (Throwable t) {
+                        readable = false;
+                    }
+
+                    if (!readable) {
+                        continue;
+                    }
+
+                    references.add(field);
+
+                    if (held.isInterface() || held.isAssignableFrom(LivingEntity.class) || LivingEntity.class.isAssignableFrom(held)) {
+                        entities.add(field);
+                    }
+
+                    if (stillOwn) {
+                        own.add(field);
+
+                        if (!held.isArray() && (Map.class.isAssignableFrom(held) || Collection.class.isAssignableFrom(held)
+                                || held.isInterface() || !Modifier.isFinal(held.getModifiers()))) {
+                            containers.add(field);
+                        }
+                    }
+                }
+            }
+        }
+
+        return new Kind(ysm, isLeafKind(type), descendsInto(type, name), readsPlainly(name), isBoneShaped(type),
+                references.toArray(new Field[0]), own.toArray(new Field[0]), containers.toArray(new Field[0]),
+                entities.toArray(new Field[0]));
+    }
+
+    /**
+     * Values that hold nothing to look through: text, numbers and the like,
+     * and arrays of plain numbers. They are not counted against the most a
+     * look goes through - of 200 000 objects, 143 278 were strings, and the
+     * look stopped there.
+     */
+    private static boolean isLeafKind(Class<?> type) {
+        return String.class.isAssignableFrom(type) || Number.class.isAssignableFrom(type) || type == Boolean.class
+                || type == Character.class || Enum.class.isAssignableFrom(type) || type == Class.class
+                || ResourceLocation.class.isAssignableFrom(type)
+                || (type.isArray() && type.getComponentType().isPrimitive());
+    }
+
+    static boolean descendsInto(Object value) {
+        return KINDS.get(value.getClass()).descends();
+    }
+
+    /**
+     * Whether the look goes on through what an object holds. The game's own
+     * objects are passed over, but for the player and the renderer the
+     * look starts from: through them it went into the world - its chunks,
+     * entities, registries, the server - and of 200 000 objects a look went
+     * through in a large pack, 8 209 were Yes Steve Model's and 150 000 and
+     * more the game's, a second of a frozen game at every change of model,
+     * with the look stopped at its limit before it had seen everything. Yes
+     * Steve Model keeps what this looks for in its own objects. The holders
+     * a mod's data rides on an entity by (NeoForge's attachments, Forge's
+     * capabilities) are gone through, the way from the player to Yes Steve
+     * Model's record of him.
+     */
+    private static boolean descendsInto(Class<?> type, String name) {
+        if (name.startsWith("net.minecraft.") || name.startsWith("com.mojang.")) {
+            return false;
+        }
+
+        // Logging, threads, class loaders, reflection: what every mod holds
+        // and nothing of a model is kept in. Yes Steve Model's loggers led
+        // into every logger of the game.
+        if (name.startsWith("org.apache.logging.") || name.startsWith("org.slf4j.") || name.startsWith("java.lang.Thread")
+                || name.startsWith("java.lang.invoke.") || name.startsWith("java.lang.reflect.") || name.startsWith("jdk.")
+                || name.startsWith("sun.") || name.startsWith("cpw.mods.") || name.startsWith("org.spongepowered.")
+                || ClassLoader.class.isAssignableFrom(type)) {
+            return false;
+        }
+
+        if (name.startsWith("net.neoforged.") || name.startsWith("net.minecraftforge.")) {
+            return name.startsWith("net.neoforged.neoforge.attachment.") || name.startsWith("net.minecraftforge.common.capabilities.");
+        }
+
+        return true;
+    }
+
+    static boolean readsPlainly(Object value) {
+        return KINDS.get(value.getClass()).plain();
+    }
+
+    /**
+     * Whether a map or a collection is gone through by its elements: Java's
+     * own, fastutil's, Guava's stored ones, the caches of Guava and
+     * Caffeine, and Yes Steve Model's. Any other - another mod's lazy map,
+     * a view that makes each value as it is read - is gone through by its
+     * fields, like any other object, which reads what it holds and makes
+     * nothing. ModernFix, with its dynamic resources on, keeps the game's
+     * block models in such a map and loads one for every value read out of
+     * it: a walk that went through it loaded them all, a freeze of seconds
+     * at every change of model.
+     */
+    private static boolean readsPlainly(String name) {
+        if (name.startsWith(YSM_PACKAGE) || name.startsWith("it.unimi.dsi.fastutil.")) {
+            return true;
+        }
+
+        if (name.startsWith("java.util.")) {
+            // Java's wrappers and the views of a map Java does not know go
+            // through to whatever they hold.
+            return !(name.contains("$Unmodifiable") || name.contains("$Synchronized") || name.contains("$Checked")
+                    || name.contains("$SetFromMap") || name.startsWith("java.util.AbstractMap$"));
+        }
+
+        if (name.startsWith("com.google.common.collect.")) {
+            String kind = name.substring("com.google.common.collect.".length());
+            return kind.startsWith("Immutable") || kind.startsWith("Regular") || kind.startsWith("Singleton")
+                    || kind.startsWith("JdkBacked") || kind.startsWith("Hash") || kind.startsWith("Linked")
+                    || kind.startsWith("ArrayList") || kind.startsWith("Tree") || kind.startsWith("Enum")
+                    || kind.startsWith("Concurrent") || kind.startsWith("Compact") || kind.startsWith("Empty");
+        }
+
+        return name.startsWith("com.google.common.cache.LocalCache") || name.startsWith("com.github.benmanes.caffeine.cache.");
     }
 }

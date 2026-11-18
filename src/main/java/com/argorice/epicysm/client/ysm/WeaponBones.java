@@ -70,8 +70,28 @@ public final class WeaponBones {
         hideLocked = value;
     }
 
-    /** Whether this bone is a weapon the model brought with it. */
+    /**
+     * Names that are a weapon in a hand and something else anywhere else.
+     * A bow is also what a ribbon is tied in: of the models Yes Steve Model
+     * ships, thirteen have a "bow" on the chest, at the back of the waist,
+     * on a hat or on a leg band, and one has a bow to shoot with - in its
+     * hand. A bolt holds a plate on as often as it flies from a crossbow.
+     */
+    private static final Set<String> IN_A_HAND_ONLY = Set.of("bow", "bolt");
+
+    /** Whether this bone is a weapon the model brought with it, by its name alone. */
     public static boolean isWeapon(String boneName) {
+        return isWeapon(boneName, null);
+    }
+
+    /**
+     * Whether this bone is a weapon the model brought with it.
+     *
+     * @param above the name of the bone above a given one, or null where it
+     *              is not known; without it a name that needs a hand to be a
+     *              weapon is not taken for one
+     */
+    public static boolean isWeapon(String boneName, @javax.annotation.Nullable java.util.function.UnaryOperator<String> above) {
         if (boneName == null || boneName.isEmpty()) {
             return false;
         }
@@ -96,6 +116,14 @@ public final class WeaponBones {
         // The whole name and the name with its trimmings off: a gun called
         // M4A1 has to be read whole, and a bone called Sword2 has not.
         String bare = trim(name);
+        String sideless = withoutSide(bare);
+
+        // The ribbon and the weapon share a name. A side in it, or a
+        // locator, says it is the weapon; so does a hand above it. A bone
+        // added to the list by hand was answered for further up.
+        if (IN_A_HAND_ONLY.contains(bare) && !name.contains("loc")) {
+            return inAHand(boneName, above);
+        }
 
         if (KNOWN.contains(name) || KNOWN.contains(bare)) {
             return true;
@@ -103,7 +131,6 @@ public final class WeaponBones {
 
         // Which side of the body a thing is on says nothing about what it
         // is. Models name a weapon twice, once per hand - LeftBow, RightAxe,
-        String sideless = withoutSide(bare);
 
         if (!sideless.equals(bare) && KNOWN.contains(sideless)) {
             return true;
@@ -123,6 +150,27 @@ public final class WeaponBones {
             if (sideless.length() > word.length() && sideless.endsWith(word)) {
                 return true;
             }
+        }
+
+        return false;
+    }
+
+    /** Whether a hand or an arm is somewhere above this bone. */
+    private static boolean inAHand(String boneName, @javax.annotation.Nullable java.util.function.UnaryOperator<String> above) {
+        if (above == null) {
+            return false;
+        }
+
+        String at = above.apply(boneName);
+
+        for (int step = 0; at != null && step < 32; step++) {
+            String lower = trim(at.toLowerCase(Locale.ROOT));
+
+            if (lower.contains("hand") || lower.endsWith("arm")) {
+                return true;
+            }
+
+            at = above.apply(at);
         }
 
         return false;

@@ -24,9 +24,9 @@ import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
-import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
+import net.minecraft.world.entity.LivingEntity;
 import yesman.epicfight.api.animation.Joint;
 import yesman.epicfight.api.animation.Pose;
 import yesman.epicfight.world.capabilities.EpicFightCapabilities;
@@ -40,10 +40,15 @@ import com.argorice.epicysm.EpicYsm;
  * with an encrypted model gets his own skeleton found, measured and posed.
  */
 public final class YsmSkeletonOverlay {
+    /**
+     * One overlay per body Yes Steve Model draws, by the entity's id: a
+     * player, or a maid of Touhou Little Maid wearing a Yes Steve Model
+     * model and fighting through Epic Fight: Touhou Little Maid.
+     */
     private static final Map<UUID, YsmSkeletonOverlay> BY_PLAYER = new java.util.HashMap<>();
 
-    /** The overlay posing this player's model. */
-    public static YsmSkeletonOverlay of(AbstractClientPlayer player) {
+    /** The overlay posing this entity's model. */
+    public static YsmSkeletonOverlay of(LivingEntity player) {
         return BY_PLAYER.computeIfAbsent(player.getUUID(), id -> new YsmSkeletonOverlay());
     }
 
@@ -63,6 +68,16 @@ public final class YsmSkeletonOverlay {
         }
 
         BY_PLAYER.clear();
+    }
+
+    /**
+     * Whether the skeleton of the model this entity wears was looked for
+     * and could not be posed. A model this mod can also convert is then
+     * converted, rather than left with its own animations.
+     */
+    public static boolean gaveUpOn(UUID player) {
+        YsmSkeletonOverlay overlay = BY_PLAYER.get(player);
+        return overlay != null && overlay.stage == Stage.GIVEN_UP;
     }
 
     /** Players with an overlay, for cleanup. */
@@ -116,6 +131,7 @@ public final class YsmSkeletonOverlay {
         role("mupperbody", Role.CHEST);
         role("allhead", Role.HEAD_OUTER);
         role("mhead", Role.HEAD_OUTER);
+        role("hhead", Role.HEAD_OUTER);
         role("head", Role.HEAD_INNER);
         role("leftarm", Role.ARM_L);
         role("leftforearm", Role.FOREARM_L);
@@ -235,26 +251,140 @@ public final class YsmSkeletonOverlay {
 
     /** Every form's body bones, whatever form is posed, to see which is on screen. */
     private Map<String, List<Bone>> formBones = Map.of();
-    private Map<String, Bone> parentBone = Map.of();
+
+    /**
+     * The bone above each bone, by the bone itself and not by its name. The
+     * body on screen is posed under the plain names whatever its own are,
+     * and a name looked up led into the body that bears it - the one put
+     * away - so the body on screen read as hidden the moment it was posed.
+     */
+    private Map<Object, Bone> parentBone = Map.of();
+
+    /**
+     * Bodies taking turns faster than any model changes its look are a
+     * misreading; they are not followed past the first few.
+     */
+    private static final int MOST_FORM_TURNS = 4;
+    private static final long FORM_TURNS_WITHIN_MS = 10_000L;
+    private int formTurns;
+    private long formTurnsSince;
+    private boolean saidFormTurns;
+
+    /**
+     * Where the body being posed stands, off the model's middle. A model
+     * with a body to spare keeps it to one side and moves the one in use
+     * to the middle with a bone's position; the skeleton is built about
+     * the body's own middle, and that move is kept on the bone it was
+     * found on rather than written over with Epic Fight's.
+     */
+    private float asideX;
+    private float asideZ;
+    private final Map<String, float[]> broughtIn = new java.util.HashMap<>();
+    private List<Bone> wholeModel = List.of();
+
+    /** The body stands off the middle and nothing moves it in: it is drawn there, and posed there. */
+    private boolean keepsItsPlace;
 
     /** Whether this bone is drawn: its scale, and every known bone above it, is not nothing. */
     private boolean shown(Bone bone) {
         Bone at = bone;
 
         for (int step = 0; at != null && step < 40; step++) {
-            if (at.hasMatrix()) {
-                float[] m = at.matrices();
-                int i = at.matrixAt();
+            if (scaledToNothing(at)) {
+                return false;
+            }
 
-                if (Math.abs(m[i + 6]) < 1.0E-4F && Math.abs(m[i + 7]) < 1.0E-4F && Math.abs(m[i + 8]) < 1.0E-4F) {
+            at = this.parentBone.get(at.target());
+        }
+
+        List<Bone> over = this.aboveInTheList.get(bone.target());
+
+        if (over != null) {
+            for (Bone above : over) {
+                if (scaledToNothing(above)) {
                     return false;
                 }
             }
-
-            at = this.parentBone.get(at.name());
         }
 
         return true;
+    }
+
+    private static boolean scaledToNothing(Bone bone) {
+        if (!bone.hasMatrix()) {
+            return false;
+        }
+
+        float[] m = bone.matrices();
+        int i = bone.matrixAt();
+        return Math.abs(m[i + 6]) < 1.0E-4F && Math.abs(m[i + 7]) < 1.0E-4F && Math.abs(m[i + 8]) < 1.0E-4F;
+    }
+
+    /**
+     * The bones each bone hangs under, as far as the model's own list
+     * says. Yes Steve Model names the bone above for the few on the way
+     * to a hand or to the head; its list of every bone runs parent first
+     * and everything under it after - on the models whose files can be
+     * read that holds for every bone - so whatever is listed between a
+     * bone and one known to hang from it hangs from it as well. A body
+     * hidden by one bone scaled to nothing is seen to be hidden that way,
+     * where each of its bones on its own looks drawn.
+     */
+    private Map<Object, List<Bone>> aboveInTheList = Map.of();
+
+    private static Map<Object, List<Bone>> hungByTheList(List<Bone> everyBone, Map<String, Bone> parents) {
+        Map<Object, Integer> ends = new IdentityHashMap<>();
+        Map<Object, Bone> tops = new IdentityHashMap<>();
+
+        for (Bone bone : everyBone) {
+            if (!bone.hasMatrix()) {
+                continue;
+            }
+
+            Bone up = parents.get(bone.name());
+
+            for (int step = 0; up != null && step < 64; step++) {
+                if (!up.hasMatrix()) {
+                    break;
+                }
+
+                // Listed before the bone it hangs from: not the order
+                // this leans on, and nothing is read out of it.
+                if (up.matrixAt() >= bone.matrixAt()) {
+                    return Map.of();
+                }
+
+                ends.merge(up.target(), bone.matrixAt(), Math::max);
+                tops.putIfAbsent(up.target(), up);
+                up = parents.get(up.name());
+            }
+        }
+
+        Map<Object, List<Bone>> out = new IdentityHashMap<>();
+
+        for (Bone bone : everyBone) {
+            if (!bone.hasMatrix()) {
+                continue;
+            }
+
+            List<Bone> over = null;
+
+            for (Bone top : tops.values()) {
+                if (top.matrixAt() < bone.matrixAt() && bone.matrixAt() <= ends.get(top.target())) {
+                    if (over == null) {
+                        over = new ArrayList<>(4);
+                    }
+
+                    over.add(top);
+                }
+            }
+
+            if (over != null) {
+                out.put(bone.target(), over);
+            }
+        }
+
+        return out;
     }
 
     /** Whether a form's body is on screen: at least one of its body bones is drawn. */
@@ -305,11 +435,30 @@ public final class YsmSkeletonOverlay {
 
         for (String other : this.formBones.keySet()) {
             if (!other.equals(this.form) && this.formShown(other)) {
-                EpicYsm.LOGGER.info("Skeleton overlay: the model switched from form '{}' to form '{}'; reading"
-                        + " the skeleton again for that one", this.form.isEmpty() ? "plain" : this.form,
-                        other.isEmpty() ? "plain" : other);
-                this.restore();
-                this.reset();
+                long now = System.nanoTime() / 1_000_000L;
+
+                if (now - this.formTurnsSince > FORM_TURNS_WITHIN_MS) {
+                    this.formTurnsSince = now;
+                    this.formTurns = 0;
+                }
+
+                if (++this.formTurns > MOST_FORM_TURNS) {
+                    if (!this.saidFormTurns) {
+                        this.saidFormTurns = true;
+                        EpicYsm.LOGGER.info("Skeleton overlay: the bodies of this model took turns {} times within ten"
+                                + " seconds ('{}' and '{}' last), which is a misreading and not the model; the body"
+                                + " being posed is kept, and they are looked at again in a while", MOST_FORM_TURNS,
+                                this.form.isEmpty() ? "plain" : this.form, other.isEmpty() ? "plain" : other);
+                    }
+
+                    return true;
+                }
+
+                EpicYsm.LOGGER.info("Skeleton overlay: the model switched from form '{}' to form '{}'; the body is put"
+                        + " together again for that one, out of the model already in hand",
+                        this.form.isEmpty() ? "plain" : this.form, other.isEmpty() ? "plain" : other);
+                this.keepsItsPlace = false;
+                this.rebuild(other);
                 return false;
             }
         }
@@ -322,6 +471,58 @@ public final class YsmSkeletonOverlay {
                 EpicYsm.LOGGER.info("Skeleton overlay: no human form of this model is on screen - it has turned"
                         + " into something else - so Yes Steve Model is left to animate it alone until a"
                         + " human form is back.");
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The model as it was last read out of Yes Steve Model's memory, kept
+     * for when only the body on screen changes. A model that puts one body
+     * away and brings out another is the same model on the same bones. It
+     * used to be looked for all over again - through a good part of Yes
+     * Steve Model's memory, every model in it read on the way - and then
+     * watched to see whether it moved, which it had been doing all along.
+     */
+    private record Held(YsmLiveSkeleton.Skeleton read, List<Bone> bones, String disk, @Nullable String form,
+                        boolean alive) {
+    }
+
+    /** The skeleton as Yes Steve Model has it, before the body on screen is picked out of it. */
+    @Nullable
+    private YsmLiveSkeleton.Skeleton read;
+    @Nullable
+    private Held held;
+
+    /** The model was being posed a draw ago: it is not watched again to be known alive. */
+    private boolean knownAlive;
+
+    /**
+     * Puts the body together again on the next draw out of the model
+     * already in hand: for another of its bodies, or for the same one where
+     * it stands.
+     */
+    private void rebuild(@Nullable String form) {
+        UUID owner = this.owner;
+        ResourceLocation subject = this.subject;
+        Held kept = this.read == null || this.wholeModel.isEmpty() ? null
+                : new Held(this.read, this.wholeModel, this.diskModel, form,
+                        this.stage == Stage.ACTIVE && this.mode == Mode.TRS);
+        this.reset();
+        this.owner = owner;
+        this.subject = subject;
+        this.held = kept;
+        this.stage = Stage.IDLE;
+        this.searches = 0;
+        this.sinceSearch = SEARCH_EVERY - 1;
+    }
+
+    /** Whether the bones kept are still the ones Yes Steve Model draws from: the same numbers on the same bones. */
+    private static boolean stillInHand(Held held) {
+        for (Bone bone : held.bones()) {
+            if (bone.hasMatrix()) {
+                return sharedArray(bone.target(), 12) == bone.matrices();
             }
         }
 
@@ -358,7 +559,32 @@ public final class YsmSkeletonOverlay {
 
     private Stage stage = Stage.IDLE;
     private UUID owner;
+    /** The entity's name, for the log: a player and a maid may share a model. */
+    private String ownerName = "";
     private ResourceLocation subject;
+
+    /**
+     * The entity the skeleton was read for. Yes Steve Model keeps a
+     * skeleton per entity, and an entity that left and came back - a maid
+     * whose chunk was unloaded, anyone through a portal - is another one
+     * under the same id: the skeleton held is no longer the one drawn.
+     */
+    @Nullable
+    private java.lang.ref.WeakReference<LivingEntity> body;
+
+    /** Whether this is the entity the skeleton was read for, or a picture of it some screen draws. */
+    private boolean sameBody(LivingEntity player) {
+        if (this.body == null || this.body.get() == player) {
+            return true;
+        }
+
+        try {
+            var level = net.minecraft.client.Minecraft.getInstance().level;
+            return level == null || level.getEntity(player.getId()) != player;
+        } catch (Throwable t) {
+            return true;
+        }
+    }
     private Map<Role, List<Bone>> bones = Map.of();
     private List<Bone> allBones = List.of();
 
@@ -459,9 +685,15 @@ public final class YsmSkeletonOverlay {
      */
     @Nullable
     private float[] leftBehind;
+    /** The frame the sample was taken in: the tick and the fraction of it. */
+    private long leftBehindTick;
+    private float leftBehindPartial;
+    /** Frames drawn since the sample; it is judged after a few. */
+    private int leftBehindFrames;
     private int sinceLivenessCheck;
     private int stillChecks;
     private static final int LIVENESS_CHECK_EVERY = 4;
+    private static final int LIVENESS_WINDOW_FRAMES = 4;
     private static final int STILL_CHECKS_BEFORE_REREAD = 30;
 
     /** How many times the live skeleton has been looked for and not found. */
@@ -469,6 +701,75 @@ public final class YsmSkeletonOverlay {
     private static final int SEARCH_EVERY = 10;
     private int searches;
     private int sinceSearch;
+
+    /**
+     * Given up is not for good. A model another player wears arrives over
+     * the network and Yes Steve Model builds it when it has it, which can
+     * be well after its texture is first drawn with; the searches above
+     * ran out before there was anything to find, and the player went
+     * without Epic Fight's pose until the model changed again. So a model
+     * given up on is looked for again: two seconds later, then four, up to
+     * half a minute between looks, for as long as it is on screen.
+     */
+    private static final int RETRY_FIRST_TICKS = 40;
+    private static final int RETRY_MOST_TICKS = 600;
+    private long retryAtTick = Long.MIN_VALUE;
+    private int giveUps;
+
+    /** Draws of this body in a row that Yes Steve Model went through without asking for a buffer. */
+    private int drawsWithoutABuffer;
+    private static final int DRAWS_WITHOUT_A_BUFFER = 60;
+
+    /** Yes Steve Model asked for a buffer while drawing this body: there is a moment to pose it in. */
+    void askedForABuffer() {
+        this.drawsWithoutABuffer = 0;
+    }
+
+    /**
+     * Yes Steve Model went through a draw of this body without asking for
+     * a buffer, so there was no moment to place Epic Fight's pose in. Often
+     * enough in a row, and the body is given up on like any other that
+     * cannot be posed - and looked at again in a while.
+     */
+    void drewWithoutABuffer() {
+        if (this.stage == Stage.GIVEN_UP || ++this.drawsWithoutABuffer <= DRAWS_WITHOUT_A_BUFFER) {
+            return;
+        }
+
+        this.drawsWithoutABuffer = 0;
+        this.giveUp("Skeleton overlay: Yes Steve Model draws {} without ever asking for a render buffer, so there is"
+                + " no moment to place Epic Fight's pose in. Its own animations are left alone, and it is tried"
+                + " again in a while", this.ownerName);
+    }
+
+    /** Whether a model given up on is due another look. */
+    private boolean retryDue() {
+        if (this.stage != Stage.GIVEN_UP) {
+            return false;
+        }
+
+        // Due, or set by another world's clock: a look further off than the
+        // longest wait there is was timed on a server left since.
+        long now = gameTime();
+        return now >= this.retryAtTick || this.retryAtTick - now > RETRY_MOST_TICKS;
+    }
+
+    /**
+     * Steps back from this model, and sets when to come back to it. The
+     * first time is said in the log at WARN; the looks after that are
+     * routine and go in with diagnostics.
+     */
+    private void giveUp(String message, Object... args) {
+        if (this.giveUps == 0) {
+            EpicYsm.LOGGER.warn(message, args);
+        } else {
+            com.argorice.epicysm.client.Diag.info(message, args);
+        }
+
+        this.stage = Stage.GIVEN_UP;
+        this.giveUps++;
+        this.retryAtTick = gameTime() + Math.min(RETRY_MOST_TICKS, RETRY_FIRST_TICKS << Math.min(this.giveUps - 1, 4));
+    }
 
     /**
      * The smallest and largest value each of the twelve numbers of a slot
@@ -505,6 +806,13 @@ public final class YsmSkeletonOverlay {
         this.others = List.of();
         this.structural = List.of();
         this.everythingElse = List.of();
+        this.faceLeftAlone = Set.of();
+        this.bodyNames = Set.of();
+        this.aboveByName = Map.of();
+        this.diskModel = "";
+        this.drawsWithoutABuffer = 0;
+        this.stills = List.of();
+        this.stillsFor = null;
         this.lastSample = new float[0];
         this.moved = new boolean[0];
         this.frames = 0;
@@ -529,6 +837,14 @@ public final class YsmSkeletonOverlay {
         this.stillChecks = 0;
         this.formBones = Map.of();
         this.parentBone = Map.of();
+        this.aboveInTheList = Map.of();
+        this.read = null;
+        this.held = null;
+        this.knownAlive = false;
+        this.asideX = 0.0F;
+        this.asideZ = 0.0F;
+        this.broughtIn.clear();
+        this.wholeModel = List.of();
         java.util.Arrays.fill(this.movedInGroup, 0);
     }
 
@@ -548,9 +864,10 @@ public final class YsmSkeletonOverlay {
      * True while there is a reason to enter YSM's render through the bridge:
      * either to find the skeleton, to measure it, or to pose it.
      */
-    public boolean wants(AbstractClientPlayer player, ResourceLocation texture) {
-        if (this.stage == Stage.GIVEN_UP && player.getUUID().equals(this.owner) && sameTexture(texture, this.subject)) {
-            return false;
+    public boolean wants(LivingEntity player, ResourceLocation texture) {
+        if (this.stage == Stage.GIVEN_UP && player.getUUID().equals(this.owner) && sameTexture(texture, this.subject)
+                && this.sameBody(player)) {
+            return this.retryDue();
         }
 
         return true;
@@ -560,12 +877,23 @@ public final class YsmSkeletonOverlay {
      * Called right before Yes Steve Model draws this player. Only finds the
      * skeleton; nothing is written here, because YSM has not posed it yet.
      */
-    public void prepare(AbstractClientPlayer player, Object renderer, ResourceLocation texture) {
+    public void prepare(LivingEntity player, Object renderer, ResourceLocation texture) {
         try {
-            boolean sameModel = player.getUUID().equals(this.owner) && sameTexture(texture, this.subject);
+            // The same model, read with the same files: a model recognised
+            // as a readable one only after its skeleton was first read is
+            // read again, its tree complete this time.
+            String disk = diskModelOf(player);
+            boolean sameModel = player.getUUID().equals(this.owner) && sameTexture(texture, this.subject)
+                    && (this.stage == Stage.IDLE || disk.equals(this.diskModel)) && this.sameBody(player);
 
             if (sameModel && this.stage != Stage.IDLE) {
-                return;
+                if (!this.retryDue()) {
+                    return;
+                }
+
+                // Another look at a model given up on, from the start.
+                this.searches = 0;
+                this.sinceSearch = SEARCH_EVERY - 1;
             }
 
             if (sameModel) {
@@ -579,15 +907,27 @@ public final class YsmSkeletonOverlay {
                 this.sinceSearch = 0;
                 this.deadCopies.clear();
                 this.keepDead = false;
+                this.giveUps = 0;
+                this.retryAtTick = Long.MIN_VALUE;
+                this.keepsItsPlace = false;
+                this.formTurns = 0;
+                this.formTurnsSince = 0L;
+                this.saidFormTurns = false;
             }
 
+            Held kept = sameModel ? this.held : null;
             this.reset();
             this.owner = player.getUUID();
+            this.ownerName = nameOf(player);
             this.subject = texture;
-            this.discover(player, renderer, texture);
+
+            if (this.body == null || this.body.get() != player) {
+                this.body = new java.lang.ref.WeakReference<>(player);
+            }
+
+            this.discover(player, renderer, texture, kept);
         } catch (Throwable t) {
-            EpicYsm.LOGGER.warn("Skeleton overlay stopped while looking for the skeleton", t);
-            this.stage = Stage.GIVEN_UP;
+            this.giveUp("Skeleton overlay stopped while looking for the skeleton", t);
         }
     }
 
@@ -595,17 +935,25 @@ public final class YsmSkeletonOverlay {
      * Called from inside YSM's own render, after its animation has posed the
      * skeleton and before it draws. This is the only moment a write survives.
      */
-    public void onDraw(AbstractClientPlayer player, float partialTicks) {
+    public void onDraw(LivingEntity player, float partialTicks) {
         try {
             switch (this.stage) {
-                case MEASURING -> this.measure();
+                case MEASURING -> {
+                    boolean posedBefore = this.knownAlive;
+                    this.measure();
+
+                    // Another body of a model that was being posed: it
+                    // is posed in the draw it is taken up in, not the next.
+                    if (posedBefore && this.stage == Stage.ACTIVE) {
+                        this.writePose(player, partialTicks);
+                    }
+                }
                 case ACTIVE -> this.writePose(player, partialTicks);
                 default -> {
                 }
             }
         } catch (Throwable t) {
-            EpicYsm.LOGGER.warn("Skeleton overlay stopped while posing the skeleton", t);
-            this.stage = Stage.GIVEN_UP;
+            this.giveUp("Skeleton overlay stopped while posing the skeleton", t);
         }
     }
 
@@ -613,10 +961,25 @@ public final class YsmSkeletonOverlay {
      * 1. Finding the live skeleton
      * ------------------------------------------------------------------ */
 
-    private void discover(AbstractClientPlayer player, Object renderer, ResourceLocation texture) {
+    private void discover(LivingEntity player, Object renderer, ResourceLocation texture, @Nullable Held held) {
+        long beganAt = System.nanoTime();
+
+        // A model whose files can be read brings its whole tree with it.
+        com.argorice.epicysm.client.ModelManager.Shape shape = player instanceof net.minecraft.client.player.AbstractClientPlayer
+                ? com.argorice.epicysm.client.ModelManager.get().shapeFor(player.getUUID()) : null;
+        this.diskModel = shape == null ? "" : shape.modelId();
+
+        // The model in hand, if it is still the one drawn and is read with
+        // the same files as it was.
+        if (held != null && (!held.disk().equals(this.diskModel) || !stillInHand(held))) {
+            held = null;
+        }
+
         // Finding the live skeleton used to be done here, by walking out
         // from the texture Yes Steve Model was drawing with. It kept coming
-        YsmLiveSkeleton.Skeleton model = YsmLiveSkeleton.readFor(player, renderer, texture, this.deadCopies);
+        YsmLiveSkeleton.Skeleton model = held != null ? held.read()
+                : YsmLiveSkeleton.readFor(player, renderer, texture, this.deadCopies);
+        long foundAt = System.nanoTime();
 
         // Arms alone - the model Yes Steve Model draws in the first person,
         // which is all there is until the body has been drawn once. Not a
@@ -628,6 +991,11 @@ public final class YsmSkeletonOverlay {
             model = null;
         }
 
+        if (held == null && model != null && shape != null) {
+            model = hungByItsFiles(model, shape);
+        }
+
+        this.read = model;
         List<Object> live = model == null ? List.of() : model.objects();
         this.chosenModel = model == null ? null : model.owner();
 
@@ -653,9 +1021,9 @@ public final class YsmSkeletonOverlay {
                 return;
             }
 
-            EpicYsm.LOGGER.warn("Skeleton overlay: no skeleton found for the texture Yes Steve Model draws this"
-                    + " player with after {} tries; its own animations are left alone", this.searches);
-            this.stage = Stage.GIVEN_UP;
+            this.giveUp("Skeleton overlay: no skeleton found for the texture Yes Steve Model draws this"
+                    + " player with after {} tries; its own animations are left alone, and it is looked for again"
+                    + " in a while - a model another player wears is built once it has arrived", this.searches);
             return;
         }
 
@@ -672,7 +1040,11 @@ public final class YsmSkeletonOverlay {
         Map<String, Set<Role>> formRoles = new LinkedHashMap<>();
         List<Bone> everyBone = new ArrayList<>();
 
-        for (Object value : live) {
+        if (held != null) {
+            everyBone.addAll(held.bones());
+        }
+
+        for (Object value : held != null ? List.<Object>of() : live) {
             // Every bone by its own name - boneNameOf answers only for the
             // twenty-odd a body is made of, and reading the model through
             String name = YsmLiveSkeleton.nameOf(value);
@@ -696,9 +1068,12 @@ public final class YsmSkeletonOverlay {
             float[] matrices = sharedArray(value, 12);
             float[] quaternions = sharedArray(value, 4);
             int[] offsets = offsetsOf(value, matrices, quaternions);
-            Bone bone = new Bone(name, value, rotation, original, offsets[0], offsets[1],
-                    matrices, quaternions, pivotOf(value));
-            everyBone.add(bone);
+            everyBone.add(new Bone(name, value, rotation, original, offsets[0], offsets[1],
+                    matrices, quaternions, pivotOf(value)));
+        }
+
+        for (Bone bone : everyBone) {
+            String name = bone.name();
             byLiveName.putIfAbsent(name, bone);
             Role boneRole = ROLE_BY_NAME.get(baseName(name).toLowerCase(Locale.ROOT));
 
@@ -710,6 +1085,9 @@ public final class YsmSkeletonOverlay {
         }
 
         Map<String, Bone> parents = new LinkedHashMap<>();
+        // Those of them that are certain, and not a guess from the name:
+        // only these say anything about the order of the model's list.
+        Map<String, Bone> listedParents = new LinkedHashMap<>();
 
         if (model != null) {
             for (YsmLiveSkeleton.LiveBone bone : model.bones()) {
@@ -717,11 +1095,26 @@ public final class YsmSkeletonOverlay {
 
                 if (above != null) {
                     parents.put(bone.name(), above);
+
+                    if (model.listed().contains(bone.name())) {
+                        listedParents.put(bone.name(), above);
+                    }
                 }
             }
         }
 
-        this.parentBone = parents;
+        Map<Object, Bone> aboveBone = new IdentityHashMap<>();
+
+        for (Bone bone : everyBone) {
+            Bone parent = parents.get(bone.name());
+
+            if (parent != null) {
+                aboveBone.put(bone.target(), parent);
+            }
+        }
+
+        this.parentBone = aboveBone;
+        this.aboveInTheList = hungByTheList(everyBone, listedParents);
         Map<String, List<Bone>> complete = new LinkedHashMap<>();
 
         for (Map.Entry<String, Set<Role>> entry : formRoles.entrySet()) {
@@ -748,6 +1141,13 @@ public final class YsmSkeletonOverlay {
             }
         }
 
+        // The body the watch has just seen come out, when that is why the
+        // model is being put together again: the same answer both times.
+        if (held != null && held.form() != null && complete.containsKey(held.form()) && this.formShown(held.form())) {
+            chosen = held.form();
+            anyShown = true;
+        }
+
         this.form = chosen;
         this.dormant = complete.size() > 0 && !anyShown;
 
@@ -769,6 +1169,27 @@ public final class YsmSkeletonOverlay {
             if (!key.equals(chosen) && bodyName(baseName(bone.name()).toLowerCase(Locale.ROOT))) {
                 foreign.add(bone.name());
             }
+        }
+
+        // The mark has had its say; now the body where it stands.
+        List<BodySettler.Part> parts = new ArrayList<>(everyBone.size());
+
+        for (Bone bone : everyBone) {
+            float[] pivot = bone.pivot();
+            Bone over = listedParents.get(bone.name());
+            parts.add(new BodySettler.Part(bone.name(), pivot == null ? 0.0F : pivot[0], pivot == null ? 0.0F : pivot[1],
+                    pivot == null ? 0.0F : pivot[2], this.shown(bone), over == null ? null : over.name(),
+                    bone.hasMatrix() ? bone.matrixAt() / 12 : -1));
+        }
+
+        BodySettler.Settled settled = BodySettler.settle(parts, chosen, foreign);
+        foreign = settled.foreign;
+        this.wholeModel = List.copyOf(everyBone);
+        this.asideX = this.keepsItsPlace ? 0.0F : settled.x;
+        this.asideZ = this.keepsItsPlace ? 0.0F : settled.z;
+
+        if (settled.changed()) {
+            EpicYsm.LOGGER.info("Skeleton overlay: the body of this model as it stands: {}", String.join("; ", settled.notes));
         }
 
         Set<String> foreignRoots = new HashSet<>();
@@ -811,7 +1232,12 @@ public final class YsmSkeletonOverlay {
                 continue;
             }
 
-            String plain = chosen.isEmpty() ? bone.name() : baseName(bone.name());
+            String plain = settled.renames.get(bone.name());
+
+            if (plain == null) {
+                plain = chosen.isEmpty() ? bone.name() : baseName(bone.name());
+            }
+
             solverName.put(bone.name(), plain);
         }
 
@@ -828,13 +1254,28 @@ public final class YsmSkeletonOverlay {
                 }
 
                 String above = bone.parent() == null ? null : solverName.get(bone.parent());
-                kept.add(new YsmLiveSkeleton.LiveBone(plain, bone.pivotX(), bone.pivotY(), bone.pivotZ(), above));
+                // About the body's own middle: the skeleton built from
+                // these puts the hips and the chest on the middle line.
+                kept.add(new YsmLiveSkeleton.LiveBone(plain, bone.pivotX() - this.asideX, bone.pivotY(),
+                        bone.pivotZ() - this.asideZ, above));
                 keptLive.add(live.get(i));
             }
 
             model = new YsmLiveSkeleton.Skeleton(kept, keptLive, model.owner(), model.repeats());
             live = keptLive;
         }
+
+        Map<String, String> above = new java.util.HashMap<>();
+
+        if (model != null) {
+            for (YsmLiveSkeleton.LiveBone bone : model.bones()) {
+                if (bone.parent() != null) {
+                    above.put(bone.name(), bone.parent());
+                }
+            }
+        }
+
+        this.aboveByName = above;
 
         Map<Role, List<Bone>> byRole = new EnumMap<>(Role.class);
         List<Bone> flat = new ArrayList<>();
@@ -870,7 +1311,7 @@ public final class YsmSkeletonOverlay {
             List<Bone> loose = new ArrayList<>();
 
             for (Bone bone : list) {
-                if (LOOSE_ALIASES.contains(bone.name().toLowerCase(Locale.ROOT)) && parents.get(bone.name()) == null) {
+                if (LOOSE_ALIASES.contains(bone.name().toLowerCase(Locale.ROOT)) && aboveBone.get(bone.target()) == null) {
                     loose.add(bone);
                 }
             }
@@ -884,14 +1325,16 @@ public final class YsmSkeletonOverlay {
         }
 
         if (byRole.size() < MIN_BONES) {
-            EpicYsm.LOGGER.warn("Skeleton overlay: only {} humanoid bone(s) found among {} candidate(s);"
+            this.giveUp("Skeleton overlay: only {} humanoid bone(s) found among {} candidate(s);"
                     + " too little to pose safely, leaving Yes Steve Model alone", byRole.size(), candidates);
-            this.stage = Stage.GIVEN_UP;
             return;
         }
 
         this.bones = byRole;
         this.allBones = flat;
+
+        // The body as settled is what is watched for still being on screen.
+        complete.put(chosen, new ArrayList<>(flat));
 
         // Everything else of this body, with its own rest rotation - the
         // old sibling walk gave every one of them a rest of zero, so a
@@ -917,7 +1360,32 @@ public final class YsmSkeletonOverlay {
 
         this.others = List.copyOf(siblings);
         this.structural = structuralBones(model, live, byRole);
-        this.everythingElse = notDriven(flat, this.structural, this.others);
+        Set<String> face = FaceBones.of(model == null ? null : model.bones());
+        this.everythingElse = notDriven(flat, this.structural, this.others, face);
+
+        // The face is left alone wherever it sits - also where the solver
+        // knows what carries it, which used to pin it all the same. Not a
+        // bone of the body, though, whatever it is called.
+        Set<String> body = new HashSet<>();
+
+        for (Bone bone : flat) {
+            body.add(bone.name());
+        }
+
+        Set<String> alone = new HashSet<>();
+
+        for (Bone bone : this.others) {
+            if (!body.contains(bone.name()) && (face != null && face.contains(bone.name()) || FaceBones.isFace(bone.name()))) {
+                alone.add(bone.name());
+            }
+        }
+
+        if (face != null && !face.isEmpty()) {
+            List<String> named = new ArrayList<>(face);
+            java.util.Collections.sort(named);
+            EpicYsm.LOGGER.info("Face: {} bone(s) of the face are left to Yes Steve Model's own animation in battle, blinks and"
+                    + " expressions with them; held at rest, every parked expression came back at once: {}", face.size(), named);
+        }
         this.measureScale();
         this.boneByName.clear();
         this.restByName.clear();
@@ -938,6 +1406,17 @@ public final class YsmSkeletonOverlay {
         }
 
         this.findOwnWeapons(texture);
+
+        // The body and the bones on the way to it, hand locators with them:
+        // settled only now, the locators having just joined.
+        for (Bone bone : this.structural) {
+            body.add(bone.name());
+        }
+
+        alone.removeAll(body);
+        this.faceLeftAlone = alone;
+        this.bodyNames = body;
+        this.stillsFor = null;
         this.solver = model == null ? null : new YsmPoseSolver(model, this.restByName);
 
         if (this.solver != null && this.solver.isReady()) {
@@ -952,7 +1431,9 @@ public final class YsmSkeletonOverlay {
         this.moved = new boolean[flat.size()];
         this.frames = 0;
         this.movedNumbers = 0;
+        this.triedEarly = false;
         this.stage = Stage.MEASURING;
+        this.knownAlive = held != null && held.alive();
 
         StringBuilder byName = new StringBuilder();
 
@@ -967,9 +1448,12 @@ public final class YsmSkeletonOverlay {
         com.argorice.epicysm.client.Diag.info("Skeleton overlay: {} live bone(s) for texture {} ({} candidate(s) in {} node(s));"
                         + " checking whether Yes Steve Model animates them. Joints: {}",
                 flat.size(), texture, candidates, nodes, byName);
+        com.argorice.epicysm.client.Diag.info("Skeleton overlay: the body was put together in {} ms, {} of them spent {}",
+                (System.nanoTime() - beganAt) / 1_000_000L, (foundAt - beganAt) / 1_000_000L,
+                held != null ? "on the model already in hand" : "finding the model in Yes Steve Model's memory");
     }
 
-    private List<Object> seeds(AbstractClientPlayer player, Object renderer) {
+    private List<Object> seeds(LivingEntity player, Object renderer) {
         List<Object> seeds = new ArrayList<>();
         seeds.add(renderer);
         seeds.add(player);
@@ -1370,6 +1854,17 @@ public final class YsmSkeletonOverlay {
      * next to them. Whichever changes while the model is being drawn is the
      */
     private void measure() {
+        // Posed a draw ago and put together again for another of its
+        // bodies: where its pose lives is known, and so is that it is the
+        // copy on screen. What the numbers look like is still asked.
+        if (this.knownAlive) {
+            this.knownAlive = false;
+
+            if (this.adoptTrs()) {
+                return;
+            }
+        }
+
         float[] sample = this.sampleAll();
         this.noteSlotRange();
 
@@ -1389,6 +1884,22 @@ public final class YsmSkeletonOverlay {
         this.frames++;
 
         if (this.frames < LIVENESS_FRAMES) {
+            // Alive already: the slots changed between two draws, so this
+            // is the copy Yes Steve Model animates, and what is left to
+            // settle - how the twelve numbers are laid out - shows in their
+            // shape, not in their motion. The full count is for a copy that
+            // sits still, to tell it from the one kept in a cache; waiting
+            // it out for every model left a body unposed for sixty draws
+            // after each change of model, a second and more of them.
+            if (!this.triedEarly && this.frames >= EARLY_FRAMES && this.movedInGroup[1] > 0) {
+                this.triedEarly = true;
+
+                if (this.adoptTrs()) {
+                    com.argorice.epicysm.client.Diag.info("Skeleton overlay: the skeleton moved within {} draw(s) of being found,"
+                            + " so it is the live one; not waited on any longer", this.frames);
+                }
+            }
+
             return;
         }
 
@@ -1434,12 +1945,15 @@ public final class YsmSkeletonOverlay {
             return;
         }
 
-        EpicYsm.LOGGER.warn("Skeleton overlay: nothing Yes Steve Model exposes for this model changes while it is"
+        this.giveUp("Skeleton overlay: nothing Yes Steve Model exposes for this model changes while it is"
                 + " drawn, so its pose is computed somewhere this mod cannot reach. Its own animations are kept.");
-        this.stage = Stage.GIVEN_UP;
     }
 
     private static final int NUMBERS_PER_BONE = 19;
+
+    /** Draws after which a skeleton seen moving is taken as the live one, and whether that was tried for this one. */
+    private static final int EARLY_FRAMES = 3;
+    private boolean triedEarly;
 
     /** Widens the seen range of every one of the twelve numbers. */
     private void noteSlotRange() {
@@ -1572,9 +2086,74 @@ public final class YsmSkeletonOverlay {
         this.mode = Mode.TRS;
         this.stage = Stage.ACTIVE;
         EpicYsm.LOGGER.info("Skeleton overlay ACTIVE on the live rotations: {} body bone(s), written in radians"
-                + " beside the position and the scale Yes Steve Model computed. Epic Fight now poses this model.",
-                this.allBones.size());
+                + " beside the position and the scale Yes Steve Model computed. Epic Fight now poses this model"
+                + " on {}.", this.allBones.size(), this.ownerName);
+        this.noteBroughtIn();
         return true;
+    }
+
+    /**
+     * A body that stands off the model's middle: which bone the model
+     * moves it in with. Read here, the last moment the numbers are all
+     * Yes Steve Model's own. On a bone Epic Fight poses the move is kept
+     * and Epic Fight's added to it; on any other it is Yes Steve Model's
+     * to keep. Found on none, the body is drawn where it stands, and the
+     * skeleton is read once more to be built there.
+     */
+    private void noteBroughtIn() {
+        this.broughtIn.clear();
+
+        if (this.asideX == 0.0F && this.asideZ == 0.0F) {
+            return;
+        }
+
+        boolean found = false;
+
+        for (Bone bone : this.allBones) {
+            if (this.bringsIn(bone)) {
+                float[] m = bone.matrices();
+                int at = bone.matrixAt();
+                this.broughtIn.put(bone.name(), new float[] { m[at + 3], m[at + 5] });
+                found = true;
+            }
+        }
+
+        if (found) {
+            EpicYsm.LOGGER.info("Skeleton overlay: the body stands {} px sideways and {} px along from the model's middle,"
+                    + " and the model moves it in on {}; that move is kept under Epic Fight's pose",
+                    round(this.asideX), round(this.asideZ), this.broughtIn.keySet());
+            return;
+        }
+
+        for (Bone bone : this.wholeModel) {
+            if (this.bringsIn(bone)) {
+                com.argorice.epicysm.client.Diag.info("Skeleton overlay: the body stands off the model's middle and the model"
+                        + " moves it in on {}, which is Yes Steve Model's to animate", bone.name());
+                return;
+            }
+        }
+
+        EpicYsm.LOGGER.info("Skeleton overlay: the body stands {} px sideways and {} px along from the model's middle and"
+                + " nothing moves it in; it is posed where it stands", round(this.asideX), round(this.asideZ));
+        this.rebuild(this.form);
+        this.keepsItsPlace = true;
+    }
+
+    /** Whether the place Yes Steve Model gave this bone is the move that brings the body to the middle. */
+    private boolean bringsIn(Bone bone) {
+        if (!bone.hasMatrix()) {
+            return false;
+        }
+
+        float[] m = bone.matrices();
+        int at = bone.matrixAt();
+        float x = Math.abs(m[at + 3]);
+        float z = Math.abs(m[at + 5]);
+        return x + z > 4.0F && Math.abs(x - Math.abs(this.asideX)) <= 1.5F && Math.abs(z - Math.abs(this.asideZ)) <= 1.5F;
+    }
+
+    private static float round(float value) {
+        return Math.round(value * 10.0F) / 10.0F;
     }
 
     /**
@@ -1658,6 +2237,12 @@ public final class YsmSkeletonOverlay {
 
     public static void setHold(Hold value) {
         hold = value;
+
+        // Carrying every bone the solver can place is what holding
+        // everything means. It used to be done under every setting, which
+        // left the other two with nothing to decide for a bone whose place
+        // in the skeleton was known.
+        YsmPoseSolver.setCarryAll(value == Hold.ALL);
     }
 
     public static boolean retarget() {
@@ -1919,7 +2504,7 @@ public final class YsmSkeletonOverlay {
      * Puts every driven bone exactly where the solver says, turn and place
      * both. This is the path that reproduces the converted models.
      */
-    private boolean writeSolved(AbstractClientPlayer player, float partialTicks) {
+    private boolean writeSolved(LivingEntity player, float partialTicks) {
         YsmPoseSolver ready = this.solver;
 
         if (ready == null) {
@@ -1932,7 +2517,7 @@ public final class YsmSkeletonOverlay {
             return false;
         }
 
-        Pose pose = patch.getAnimator().getPose(partialTicks);
+        Pose pose = EpicFightPoses.of(patch, partialTicks);
 
         if (pose == null) {
             return false;
@@ -1945,10 +2530,18 @@ public final class YsmSkeletonOverlay {
             return false;
         }
 
-        this.askWhereHandsAreDrawn();
+        // The report of where the hands are drawn is read, not acted on
+        // (USE_REPORT); asking Yes Steve Model for it costs it a transform
+        // per locator per frame. Only while someone reads the numbers.
+        if (USE_REPORT || com.argorice.epicysm.client.Diag.on()) {
+            this.askWhereHandsAreDrawn();
+        }
+
         Vector3f euler = new Vector3f();
 
-        for (Bone bone : this.heldBones()) {
+        for (Still still : this.keptStill(ready)) {
+            Bone bone = still.bone();
+
             if (!placements.containsKey(bone.name())) {
                 float[] rest = bone.original();
                 float[] m = bone.matrices();
@@ -1956,14 +2549,24 @@ public final class YsmSkeletonOverlay {
                 m[at] = rest[0];
                 m[at + 1] = rest[1];
                 m[at + 2] = rest[2];
-                clearOffset(m, at);
+
+                // A part of the body is put back where it rests. Anything
+                // else keeps the place Yes Steve Model gave it this frame:
+                // that place is how a model switches its layers - the
+                // expression in use brought a pixel forward of the others,
+                // a part not worn parked out of sight. Cleared, the parked
+                // part came back and the expression in use sank among the
+                // rest.
+                if (still.ofTheBody()) {
+                    clearOffset(m, at);
+                }
             }
         }
 
         for (Map.Entry<String, YsmPoseSolver.Placement> entry : placements.entrySet()) {
             Bone bone = this.boneByName.get(entry.getKey());
 
-            if (bone == null || !bone.hasMatrix()) {
+            if (bone == null || !bone.hasMatrix() || this.faceLeftAlone.contains(entry.getKey())) {
                 continue;
             }
 
@@ -1992,6 +2595,13 @@ public final class YsmSkeletonOverlay {
             m[at + 3] = -offset.x * placeScale;
             m[at + 4] = offset.y * placeScale;
             m[at + 5] = offset.z * placeScale;
+
+            float[] moved = this.broughtIn.get(entry.getKey());
+
+            if (moved != null) {
+                m[at + 3] += moved[0];
+                m[at + 5] += moved[1];
+            }
         }
 
         return true;
@@ -2039,7 +2649,7 @@ public final class YsmSkeletonOverlay {
         return this.solver;
     }
 
-    public Map<String, Matrix4f> drawnJoints(AbstractClientPlayer player) {
+    public Map<String, Matrix4f> drawnJoints(LivingEntity player) {
         YsmPoseSolver ready = this.solver;
 
         if (ready == null || this.probe || this.dormant || this.stage != Stage.ACTIVE || this.mode != Mode.TRS
@@ -2180,6 +2790,10 @@ public final class YsmSkeletonOverlay {
      * jumps between the joint and the hand.
      */
     private void glueToHands(Map<String, Matrix4f> joints) {
+        if (!USE_REPORT && !com.argorice.epicysm.client.Diag.on()) {
+            return;
+        }
+
         long now = System.nanoTime();
         float seconds = this.correctionStepped == 0L ? 0.0F : Math.min(0.1F, (now - this.correctionStepped) / 1.0e9F);
         this.correctionStepped = now;
@@ -2423,6 +3037,10 @@ public final class YsmSkeletonOverlay {
         return ready.boneAsDrawn(this.handLocators.get(0).name());
     }
 
+    /** The tables already written out, by model and body: what each said, and when. */
+    private final Map<String, long[]> described = new java.util.HashMap<>();
+    private static final long DESCRIBED_AGAIN_AFTER_MS = 300_000L;
+
     /**
      * Writes one file per model describing every bone as this mod sees it:
      * form, part of the body, joint, the bone above, where it rests, whether
@@ -2432,6 +3050,28 @@ public final class YsmSkeletonOverlay {
     private void describeModel(@Nullable ResourceLocation texture, @Nullable YsmLiveSkeleton.Skeleton model,
                                List<Bone> everyBone, Set<String> foreign, Map<String, String> solverName,
                                Map<Role, List<Bone>> byRole) {
+        // A thousand lines for a large model, into a file and into the log:
+        // written for whoever has diagnostics on, not at every change of
+        // model for everybody.
+        if (!com.argorice.epicysm.client.Diag.on()) {
+            return;
+        }
+
+        // Nor the same table twice running: a model read again and found
+        // as it was has nothing new to say.
+        String reading = texture + "|" + this.form + "|" + this.dormant;
+        long sum = 31L * foreign.hashCode() + solverName.hashCode();
+        long clock = System.nanoTime() / 1_000_000L;
+        long[] before = this.described.get(reading);
+
+        if (before != null && before[0] == sum && clock - before[1] < DESCRIBED_AGAIN_AFTER_MS) {
+            com.argorice.epicysm.client.Diag.info("Skeleton overlay: the model reads as it did {} s ago; its table is not"
+                    + " written out again", (clock - before[1]) / 1000L);
+            return;
+        }
+
+        this.described.put(reading, new long[] { sum, clock });
+
         try {
             String id = texture == null ? "unknown" : texture.getPath().replaceAll("[^A-Za-z0-9_.-]", "_");
             java.nio.file.Path file = net.minecraft.client.Minecraft.getInstance().gameDirectory.toPath()
@@ -2465,7 +3105,8 @@ public final class YsmSkeletonOverlay {
             List<String> out = new ArrayList<>();
             out.add("Model " + texture + " as EpicYSM reads it. Form posed: '" + (this.form.isEmpty() ? "plain" : this.form)
                     + "'" + (this.dormant ? " (not on screen right now)" : ""));
-            out.add("name | form | as solver | role | joint | above | status | shown | pivot | rest rotation (rad)");
+            out.add("name | form | as solver | role | joint | above | status | shown | pivot | rest rotation (rad)"
+                    + " | place in the model's list | scale now | position now");
             List<String> rows = new ArrayList<>();
 
             for (Bone bone : everyBone) {
@@ -2479,13 +3120,19 @@ public final class YsmSkeletonOverlay {
                 String joint = plain == null ? "" : joints.getOrDefault(plain.toLowerCase(Locale.ROOT), "");
                 float[] pivot = bone.pivot();
                 float[] rest = bone.original();
-                rows.add(String.format(Locale.ROOT, "%s | %s | %s | %s | %s | %s | %s | %s | %.3f %.3f %.3f | %.3f %.3f %.3f",
+                float[] now = bone.hasMatrix() ? bone.matrices() : null;
+                int slot = bone.matrixAt();
+                rows.add(String.format(Locale.ROOT, "%s | %s | %s | %s | %s | %s | %s | %s | %.3f %.3f %.3f | %.3f %.3f %.3f"
+                                + " | %d | %.2f %.2f %.2f | %.2f %.2f %.2f",
                         bone.name(), formKey(bone.name()).isEmpty() ? "plain" : formKey(bone.name()),
                         plain == null ? "-" : plain, "null".equals(role) ? "" : role, joint,
                         parentOf.getOrDefault(plain == null ? bone.name() : plain, "?"), status,
                         this.shown(bone) ? "yes" : "no",
                         pivot == null ? 0.0F : pivot[0], pivot == null ? 0.0F : pivot[1], pivot == null ? 0.0F : pivot[2],
-                        rest == null ? 0.0F : rest[0], rest == null ? 0.0F : rest[1], rest == null ? 0.0F : rest[2]));
+                        rest == null ? 0.0F : rest[0], rest == null ? 0.0F : rest[1], rest == null ? 0.0F : rest[2],
+                        slot < 0 ? -1 : slot / 12,
+                        now == null ? 1.0F : now[slot + 6], now == null ? 1.0F : now[slot + 7], now == null ? 1.0F : now[slot + 8],
+                        now == null ? 0.0F : now[slot + 3], now == null ? 0.0F : now[slot + 4], now == null ? 0.0F : now[slot + 5]));
             }
 
             rows.sort(String::compareTo);
@@ -2583,6 +3230,7 @@ public final class YsmSkeletonOverlay {
         List<Bone> locators = new ArrayList<>();
         List<String> described = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
+        boolean describe = com.argorice.epicysm.client.Diag.on();
 
         for (Bone bone : this.boneByName.values()) {
             String name = bone.name();
@@ -2591,7 +3239,7 @@ public final class YsmSkeletonOverlay {
                 continue;
             }
 
-            boolean weapon = WeaponBones.isWeapon(name);
+            boolean weapon = WeaponBones.isWeapon(name, this.aboveByName::get);
 
             if (weapon && bone.hasMatrix()) {
                 weapons.add(bone);
@@ -2601,10 +3249,12 @@ public final class YsmSkeletonOverlay {
                 locators.add(bone);
             }
 
-            float[] pivot = bone.pivot();
-            described.add(String.format(Locale.ROOT, "%-32s pivot %8.3f %8.3f %8.3f%s", name,
-                    pivot == null ? 0.0F : pivot[0], pivot == null ? 0.0F : pivot[1],
-                    pivot == null ? 0.0F : pivot[2], weapon ? "   <- put away in battle" : ""));
+            if (describe) {
+                float[] pivot = bone.pivot();
+                described.add(String.format(Locale.ROOT, "%-32s pivot %8.3f %8.3f %8.3f%s", name,
+                        pivot == null ? 0.0F : pivot[0], pivot == null ? 0.0F : pivot[1],
+                        pivot == null ? 0.0F : pivot[2], weapon ? "   <- put away in battle" : ""));
+            }
         }
 
         described.sort(String::compareTo);
@@ -2625,7 +3275,7 @@ public final class YsmSkeletonOverlay {
 
             this.structural = List.copyOf(held);
         }
-        if (com.argorice.epicysm.client.Diag.on()) {
+        if (describe) {
             WeaponBones.describe(texture == null ? null : texture.toString(), described);
         }
 
@@ -2665,7 +3315,9 @@ public final class YsmSkeletonOverlay {
      * inside its parent's scale.
      */
     private void putOwnWeaponsAway() {
-        if (WeaponBones.hideLocked()) {
+        // Each kind of model has its own switch for this, and a readable
+        // model drawn here answers to the one for readable models.
+        if (this.diskModel.isEmpty() ? WeaponBones.hideLocked() : WeaponBones.hideOpen()) {
             for (Bone bone : this.ownWeapons) {
                 collapse(bone);
             }
@@ -2723,7 +3375,12 @@ public final class YsmSkeletonOverlay {
             m[at] = rest[0];
             m[at + 1] = rest[1];
             m[at + 2] = rest[2];
-            clearOffset(m, at);
+
+            // As where the solver places the bones: only a part of the
+            // body is put back in place, a layer keeps the place it has.
+            if (this.bodyNames.contains(bone.name())) {
+                clearOffset(m, at);
+            }
         }
 
         for (Map.Entry<Role, List<Bone>> entry : this.bones.entrySet()) {
@@ -2848,7 +3505,8 @@ public final class YsmSkeletonOverlay {
     }
 
     /** The in-between bones plus every other bone that is not driven. */
-    private static List<Bone> notDriven(List<Bone> driven, List<Bone> structural, List<Bone> others) {
+    private static List<Bone> notDriven(List<Bone> driven, List<Bone> structural, List<Bone> others,
+                                        @Nullable Set<String> face) {
         Set<Object> taken = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
 
         for (Bone bone : driven) {
@@ -2858,7 +3516,10 @@ public final class YsmSkeletonOverlay {
         List<Bone> out = new ArrayList<>(structural);
 
         for (Bone bone : others) {
-            if (bone.hasMatrix() && !taken.contains(bone.target())) {
+            // The face is Yes Steve Model's: its expressions are parked by
+            // the model's own animation, and held at rest they all show.
+            if (bone.hasMatrix() && !taken.contains(bone.target())
+                    && (face == null || !face.contains(bone.name()) && !FaceBones.isFace(bone.name()))) {
                 out.add(bone);
             }
         }
@@ -2873,6 +3534,133 @@ public final class YsmSkeletonOverlay {
             case PATH -> this.structural;
             case ALL -> this.everythingElse;
         };
+    }
+
+    /** A bone put back to its rest every frame, and whether its place goes back with its turn. */
+    private record Still(Bone bone, boolean ofTheBody) {
+    }
+
+    /**
+     * The model on disk this skeleton was read with the help of - a model
+     * whose files this mod can read - or nothing for an encrypted one.
+     */
+    private String diskModel = "";
+
+    private static String diskModelOf(LivingEntity player) {
+        if (!(player instanceof net.minecraft.client.player.AbstractClientPlayer)) {
+            return "";
+        }
+
+        com.argorice.epicysm.client.ModelManager.Shape shape =
+                com.argorice.epicysm.client.ModelManager.get().shapeFor(player.getUUID());
+        return shape == null ? "" : shape.modelId();
+    }
+
+    /**
+     * The same skeleton with every bone hung where the model's own files
+     * hang it. Yes Steve Model hands over the tree in pieces - of a model
+     * of sixty bones, the bone above is known for some twenty-five - and a
+     * bone whose place in the tree is not known can only be held still or
+     * left alone. Not used unless the files are plainly this model's.
+     */
+    private static YsmLiveSkeleton.Skeleton hungByItsFiles(YsmLiveSkeleton.Skeleton model,
+                                                           com.argorice.epicysm.client.ModelManager.Shape shape) {
+        Set<String> live = new HashSet<>();
+        // Bones whose bone above is certain: the files' word, or Yes Steve
+        // Model's own.
+        Set<String> sure = new HashSet<>();
+        int shared = 0;
+        int known = 0;
+
+        for (YsmLiveSkeleton.LiveBone bone : model.bones()) {
+            live.add(bone.name());
+
+            if (shape.names().contains(bone.name())) {
+                shared++;
+            }
+
+            if (bone.parent() != null) {
+                known++;
+            }
+        }
+
+        if (shared * 4 < model.bones().size() * 3) {
+            com.argorice.epicysm.client.Diag.info("Skeleton overlay: the files of '{}' name {} of this skeleton's {} bone(s) -"
+                    + " not the same model, so its tree is not taken from them", shape.modelId(), shared, model.bones().size());
+            return model;
+        }
+
+        List<YsmLiveSkeleton.LiveBone> hung = new ArrayList<>(model.bones().size());
+        int now = 0;
+
+        for (YsmLiveSkeleton.LiveBone bone : model.bones()) {
+            String above = shape.above().get(bone.name());
+
+            if (above == null || !live.contains(above) || above.equals(bone.name())) {
+                above = bone.parent();
+
+                if (above != null && model.listed().contains(bone.name())) {
+                    sure.add(bone.name());
+                }
+            } else {
+                sure.add(bone.name());
+            }
+
+            if (above != null) {
+                now++;
+            }
+
+            hung.add(new YsmLiveSkeleton.LiveBone(bone.name(), bone.pivotX(), bone.pivotY(), bone.pivotZ(), above));
+        }
+
+        com.argorice.epicysm.client.Diag.info("Skeleton overlay: the files of '{}' say which bone hangs from which; {} of {}"
+                + " bone(s) know the bone above them now, {} did from Yes Steve Model's own lists", shape.modelId(), now,
+                hung.size(), known);
+        return new YsmLiveSkeleton.Skeleton(hung, model.objects(), model.owner(), model.repeats(), Set.copyOf(sure));
+    }
+
+    /** The bone above each bone, by the names the solver uses, where Yes Steve Model or the model's files say. */
+    private Map<String, String> aboveByName = Map.of();
+
+    /** Bones of the face that are not part of the body: never written, whatever carries them. */
+    private Set<String> faceLeftAlone = Set.of();
+
+    /** Bones that are the body or lie on the way to it: their place is this mod's as well as their turn. */
+    private Set<String> bodyNames = Set.of();
+
+    private List<Still> stills = List.of();
+    private Hold stillsFor;
+
+    /**
+     * Everything written back to rest each frame under the setting in
+     * force: the bones the setting holds, and - while every bone is carried
+     * - the ones the solver leaves riding on their parent. Put together
+     * once, and again when the setting changes.
+     */
+    private List<Still> keptStill(YsmPoseSolver ready) {
+        if (this.stillsFor == hold) {
+            return this.stills;
+        }
+
+        Map<String, Still> out = new LinkedHashMap<>();
+
+        for (Bone bone : this.heldBones()) {
+            if (bone.hasMatrix()) {
+                out.putIfAbsent(bone.name(), new Still(bone, this.bodyNames.contains(bone.name())));
+            }
+        }
+
+        for (String name : ready.riders()) {
+            Bone bone = this.boneByName.get(name);
+
+            if (bone != null && bone.hasMatrix() && !this.faceLeftAlone.contains(name)) {
+                out.putIfAbsent(name, new Still(bone, this.bodyNames.contains(name)));
+            }
+        }
+
+        this.stills = List.copyOf(out.values());
+        this.stillsFor = hold;
+        return this.stills;
     }
 
     /**
@@ -3060,10 +3848,9 @@ public final class YsmSkeletonOverlay {
         }
 
         if (rowMajor == 0 && columnMajor == 0) {
-            EpicYsm.LOGGER.warn("Skeleton overlay: the twelve numbers per bone do move, but none of them sits where"
+            this.giveUp("Skeleton overlay: the twelve numbers per bone do move, but none of them sits where"
                     + " a position would - they are not a transform this mod can write. Checked {} bone(s).{}",
                     usable, this.exampleSlot());
-            this.stage = Stage.GIVEN_UP;
             return false;
         }
 
@@ -3135,52 +3922,86 @@ public final class YsmSkeletonOverlay {
 
     /** Whether Epic Fight is actually in charge of this player right now. */
     /** The same question, for the bridge. */
-    public static boolean fighting(AbstractClientPlayer player) {
+    public static boolean fighting(LivingEntity player) {
         YsmSkeletonOverlay overlay = BY_PLAYER.get(player.getUUID());
         return epicFightInCharge(player) && (overlay == null || !overlay.dormant);
     }
 
-    private static boolean epicFightInCharge(AbstractClientPlayer player) {
+    private static boolean epicFightInCharge(LivingEntity player) {
         try {
-            var patch = EpicFightCapabilities.getEntityPatch(player,
-                    yesman.epicfight.world.capabilities.entitypatch.player.PlayerPatch.class);
-            // In bed, Epic Fight's pose is one written for its own body
-            // (it stands a Yes Steve Model model on its head); the model's
-            // own sleeping animation is the right one there.
-            return patch != null && patch.isEpicFightMode() && !drawingABow(player) && !player.isSleeping();
+            if (com.argorice.epicysm.client.compat.LeftToYsm.now(player)) {
+                // In bed, Epic Fight's pose is one written for its own body
+                // (it stands a Yes Steve Model model on its head); the
+                // model's own sleeping animation is the right one there. A
+                // bow drawn, a gun in hand, an emote: the same.
+                return false;
+            }
+
+            if (player instanceof net.minecraft.world.entity.player.Player) {
+                var patch = EpicFightCapabilities.getEntityPatch(player,
+                        yesman.epicfight.world.capabilities.entitypatch.player.PlayerPatch.class);
+                return patch != null && com.argorice.epicysm.client.compat.EpicFightApi.epicFightMode(patch);
+            }
+
+            // Anything else - a maid - is Epic Fight's whenever its patch
+            // says Epic Fight draws it: the maid's, while she is set to
+            // fight. A player's patch is not asked this way, its answer
+            // posts an event.
+            LivingEntityPatch<?> patch = EpicFightCapabilities.getEntityPatch(player, LivingEntityPatch.class);
+            return patch != null && patch.overrideRender();
         } catch (Throwable t) {
             return false;
         }
     }
 
-    /**
-     * Whether the player is drawing a bow or loading a crossbow with the use
-     * key - the vanilla way, held down.
-     */
-    private static boolean drawingABow(AbstractClientPlayer player) {
-        if (!player.isUsingItem() || !com.argorice.epicysm.client.EpicYsmConfig.bowByYsm()) {
-            return false;
-        }
 
-        net.minecraft.world.item.ItemStack using = player.getUseItem();
-        return !using.isEmpty() && using.getItem() instanceof net.minecraft.world.item.ProjectileWeaponItem;
-    }
-
-    private void writePose(AbstractClientPlayer player, float partialTicks) {
-        if (!this.probe && this.copyNoLongerDrawn()) {
+    private void writePose(LivingEntity player, float partialTicks) {
+        if (!this.probe && this.copyNoLongerDrawn(partialTicks)) {
             return;
         }
 
         this.writePoseNow(player, partialTicks);
 
-        // Every few frames, what was left in the slots; next frame says
-        // whether Yes Steve Model wrote over it. Not while the game is
-        // paused: the world is still drawn behind the menu, but nothing
-        // animates, and two seconds of that read as the model no longer
-        // being drawn - it was read again on every return from the menu.
-        if (!this.probe && !this.keepDead && epicFightInCharge(player) && !paused()
-                && ++this.sinceLivenessCheck % LIVENESS_CHECK_EVERY == 0) {
+        if (this.probe || this.keepDead || !epicFightInCharge(player) || paused()) {
+            return;
+        }
+
+        // A sample still waiting out its frames: what this draw wrote is
+        // what the next draw is measured against.
+        if (this.leftBehind != null) {
             this.leftBehind = this.sampleAll();
+            return;
+        }
+
+        // Every few draws, what was left in the slots; the draws of the
+        // next few frames say whether Yes Steve Model wrote over it. Not
+        // while the game is paused: the world is still drawn behind the
+        // menu, but nothing animates, and two seconds of that read as the
+        // model no longer being drawn - it was read again on every return
+        // from the menu.
+        if (++this.sinceLivenessCheck % LIVENESS_CHECK_EVERY == 0) {
+            this.leftBehind = this.sampleAll();
+            this.leftBehindTick = gameTime();
+            this.leftBehindPartial = partialTicks;
+            this.leftBehindFrames = 0;
+        }
+    }
+
+    /** The entity's name as the log shows it, without the colour codes a maid's may carry. */
+    static String nameOf(LivingEntity entity) {
+        try {
+            return entity.getName().getString().replaceAll("\u00a7.", "");
+        } catch (Throwable t) {
+            return String.valueOf(entity.getUUID());
+        }
+    }
+
+    private static long gameTime() {
+        try {
+            var level = net.minecraft.client.Minecraft.getInstance().level;
+            return level == null ? 0L : level.getGameTime();
+        } catch (Throwable t) {
+            return 0L;
         }
     }
 
@@ -3197,12 +4018,31 @@ public final class YsmSkeletonOverlay {
      * for long enough to say it no longer draws it. The model is then read
      * again, the way it is after a switch.
      */
-    private boolean copyNoLongerDrawn() {
+    private boolean copyNoLongerDrawn(float partialTicks) {
         float[] left = this.leftBehind;
-        this.leftBehind = null;
 
         if (left == null || paused()) {
             return false;
+        }
+
+        // Yes Steve Model writes its animation once a frame at most - its
+        // own rate is capped, and a body is drawn more than once a frame
+        // under shaders, the shadow pass and then the world, on the one
+        // write. So one draw after the sample says nothing: a second draw
+        // of the same frame finds the slots as this overlay left them, and
+        // so does the next frame when the cap skipped it. Measured over
+        // one draw, a maid's copy read as no longer drawn whenever the
+        // draws fell so that the sample was taken in the shadow pass, and
+        // was read again, and passed over, every second. The sample is
+        // held for a few frames instead, refreshed after every write of
+        // this overlay's in between, and the copy counts as still only
+        // when nothing else wrote to it in all of them.
+        long tick = gameTime();
+
+        if (tick != this.leftBehindTick || partialTicks != this.leftBehindPartial) {
+            this.leftBehindTick = tick;
+            this.leftBehindPartial = partialTicks;
+            this.leftBehindFrames++;
         }
 
         float[] now = this.sampleAll();
@@ -3210,18 +4050,38 @@ public final class YsmSkeletonOverlay {
         if (now.length == left.length) {
             for (int i = 0; i < now.length; i++) {
                 if (Math.abs(now[i] - left[i]) > 1.0E-5F) {
+                    this.leftBehind = null;
                     this.stillChecks = 0;
                     return false;
                 }
             }
         }
 
+        if (this.leftBehindFrames < LIVENESS_WINDOW_FRAMES) {
+            return false;
+        }
+
+        this.leftBehind = null;
+
         if (++this.stillChecks < STILL_CHECKS_BEFORE_REREAD) {
             return false;
         }
 
-        EpicYsm.LOGGER.info("Skeleton overlay: Yes Steve Model has stopped animating the skeleton being posed -"
-                + " it draws this model from a newer copy now - so the model is read again");
+        // The copy that went still is passed over on the re-read. It is
+        // often still there to be found - Yes Steve Model keeps the copies
+        // its screens built, and a maid's old copy outlives her new one -
+        // and it ranks where it ranked before, so a read that could take it
+        // again took it again, found it still again, and read again, every
+        // second, with the model's whole table in the log each time round.
+        // When every copy has been passed over, the first is taken back and
+        // kept, checks and all, the same as when a model never moves.
+        if (this.chosenModel != null && this.deadCopies.size() < MAX_DEAD_COPIES) {
+            this.deadCopies.add(this.chosenModel);
+        }
+
+        EpicYsm.LOGGER.info("Skeleton overlay: Yes Steve Model has stopped animating the skeleton being posed for {} -"
+                + " it draws this model from a newer copy now - so the model is read again, this copy passed over"
+                + " ({} so far)", this.ownerName, this.deadCopies.size());
         UUID owner = this.owner;
         ResourceLocation subject = this.subject;
         this.reset();
@@ -3230,12 +4090,11 @@ public final class YsmSkeletonOverlay {
         this.stage = Stage.IDLE;
         this.searches = 0;
         this.sinceSearch = 0;
-        this.deadCopies.clear();
         this.keepDead = false;
         return true;
     }
 
-    private void writePoseNow(AbstractClientPlayer player, float partialTicks) {
+    private void writePoseNow(LivingEntity player, float partialTicks) {
         // Only the body on screen is posed; a model that has turned into
         // something else is Yes Steve Model's alone until it turns back.
         if (!this.probe && !this.formStillShown()) {
@@ -3463,14 +4322,14 @@ public final class YsmSkeletonOverlay {
      * Model skeleton.
      */
     @Nullable
-    private Map<Role, Quaternionf> epicFightPose(AbstractClientPlayer player, float partialTicks) {
+    private Map<Role, Quaternionf> epicFightPose(LivingEntity player, float partialTicks) {
         LivingEntityPatch<?> patch = EpicFightCapabilities.getEntityPatch(player, LivingEntityPatch.class);
 
         if (patch == null || patch.getAnimator() == null) {
             return null;
         }
 
-        Pose pose = patch.getAnimator().getPose(partialTicks);
+        Pose pose = EpicFightPoses.of(patch, partialTicks);
 
         if (pose == null) {
             return null;

@@ -9,6 +9,10 @@
     "OBBColliderAccess",
     "OBBColliderMixin"
   ],
+  "client": [
+    "AbstractClientPlayerPatchMixin",
+    "RenderEngineMixin"
+  ],
   "injectors": {
     "defaultRequire": 0
   }

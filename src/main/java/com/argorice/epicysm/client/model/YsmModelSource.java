@@ -222,12 +222,35 @@ public final class YsmModelSource {
     }
 
     /**
-     * Every parsed animation file of the model: everything under
-     * animations/ plus any files listed in ysm.json files.player.animation.
-     * Used to find bones the model keeps hidden by default.
+     * The model's animation files for the player's body, the main one
+     * first: the ones ysm.json lists for the player, or, for a model whose
+     * ysm.json lists none, every animation file it has but those of another
+     * thing.
+     *
+     * A model animates more than the player: the arms in first person, the
+     * arrows it shoots, the horse it rides - each in a file of its own, and
+     * each with animations named the same as the player's ("parallel1").
+     * All of them were read as one, the one read last winning, and a
+     * player's animation was taken from the arrow's: the fox a model keeps
+     * as a second form, hidden until the player changes into it, was
+     * shown beside the girl.
      */
     public java.util.List<JsonObject> readAnimationFiles() {
         java.util.Map<String, JsonObject> out = new java.util.LinkedHashMap<>();
+
+        for (String declared : this.declaredPlayerAnimations()) {
+            JsonObject parsed = out.containsKey(declared) ? null : readJson(declared);
+
+            if (parsed != null) {
+                out.put(declared, parsed);
+            }
+        }
+
+        if (!out.isEmpty()) {
+            return new java.util.ArrayList<>(out.values());
+        }
+
+        java.util.List<String> found = new java.util.ArrayList<>();
 
         try {
             if (this.zip) {
@@ -236,74 +259,102 @@ public final class YsmModelSource {
 
                     while (entries.hasMoreElements()) {
                         ZipEntry entry = entries.nextElement();
-                        String lower = entry.getName().toLowerCase(Locale.ROOT);
 
-                        if (!entry.isDirectory() && isAnimationEntry(lower)) {
-                            JsonObject parsed = readJson(entry.getName());
-
-                            if (parsed != null) {
-                                out.put(entry.getName(), parsed);
-                            }
+                        if (!entry.isDirectory() && isAnimationEntry(entry.getName().toLowerCase(Locale.ROOT))) {
+                            found.add(entry.getName());
                         }
                     }
                 }
             } else {
                 try (var stream = Files.walk(this.path, 3)) {
                     for (Path file : (Iterable<Path>) stream::iterator) {
-                        if (!Files.isRegularFile(file)) {
-                            continue;
-                        }
-
                         String relative = this.path.relativize(file).toString().replace('\\', '/');
 
-                        if (isAnimationEntry(relative.toLowerCase(Locale.ROOT))) {
-                            JsonObject parsed = readJson(relative);
-
-                            if (parsed != null) {
-                                out.put(relative, parsed);
-                            }
+                        if (Files.isRegularFile(file) && isAnimationEntry(relative.toLowerCase(Locale.ROOT))) {
+                            found.add(relative);
                         }
                     }
                 }
             }
         } catch (IOException ignored) {
-            // Whatever was read so far is still usable.
+            // Whatever was found so far is still usable.
         }
 
-        JsonObject metadata = readMetadata();
+        // The main file first: where two files name an animation alike,
+        // the player's own is the main file's.
+        found.removeIf(name -> forAnotherThing(name.toLowerCase(Locale.ROOT)));
+        found.sort(java.util.Comparator.comparing(name -> !isMainAnimation(name.toLowerCase(Locale.ROOT))));
 
-        if (metadata != null && metadata.has("files") && metadata.getAsJsonObject("files").has("player")) {
-            JsonObject player = metadata.getAsJsonObject("files").getAsJsonObject("player");
+        for (String name : found) {
+            JsonObject parsed = readJson(name);
 
-            if (player.has("animation")) {
-                // Either a list of paths or a {"key": "path"} object.
-                java.util.List<com.google.gson.JsonElement> items = new java.util.ArrayList<>();
-                com.google.gson.JsonElement animation = player.get("animation");
-
-                if (animation.isJsonArray()) {
-                    animation.getAsJsonArray().forEach(items::add);
-                } else if (animation.isJsonObject()) {
-                    animation.getAsJsonObject().entrySet().forEach(entry -> items.add(entry.getValue()));
-                }
-
-                for (com.google.gson.JsonElement item : items) {
-                    try {
-                        String entryPath = item.getAsString();
-
-                        if (!out.containsKey(entryPath)) {
-                            JsonObject parsed = readJson(entryPath);
-
-                            if (parsed != null) {
-                                out.put(entryPath, parsed);
-                            }
-                        }
-                    } catch (Exception ignored) {
-                    }
-                }
+            if (parsed != null) {
+                out.put(name, parsed);
             }
         }
 
         return new java.util.ArrayList<>(out.values());
+    }
+
+    /**
+     * The animation files ysm.json lists for the player, the main one first
+     * and the first-person arms left out: either a list of paths or a
+     * {"key": "path"} object.
+     */
+    private java.util.List<String> declaredPlayerAnimations() {
+        java.util.List<String> paths = new java.util.ArrayList<>();
+        JsonObject metadata = readMetadata();
+
+        try {
+            if (metadata == null || !metadata.has("files") || !metadata.getAsJsonObject("files").has("player")) {
+                return paths;
+            }
+
+            JsonObject player = metadata.getAsJsonObject("files").getAsJsonObject("player");
+            com.google.gson.JsonElement animation = player.get("animation");
+
+            if (animation == null) {
+                return paths;
+            }
+
+            if (animation.isJsonArray()) {
+                for (com.google.gson.JsonElement item : animation.getAsJsonArray()) {
+                    if (item.isJsonPrimitive() && !forAnotherThing(item.getAsString().toLowerCase(Locale.ROOT))) {
+                        paths.add(item.getAsString());
+                    }
+                }
+            } else if (animation.isJsonObject()) {
+                for (Map.Entry<String, com.google.gson.JsonElement> entry : animation.getAsJsonObject().entrySet()) {
+                    String key = entry.getKey().toLowerCase(Locale.ROOT);
+
+                    if (entry.getValue().isJsonPrimitive() && !key.equals("arm") && !key.equals("fp_arm")
+                            && !forAnotherThing(entry.getValue().getAsString().toLowerCase(Locale.ROOT))) {
+                        if (key.equals("main")) {
+                            paths.add(0, entry.getValue().getAsString());
+                        } else {
+                            paths.add(entry.getValue().getAsString());
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // A ysm.json of another shape: the files are looked for instead.
+            paths.clear();
+        }
+
+        paths.sort(java.util.Comparator.comparing(name -> !isMainAnimation(name.toLowerCase(Locale.ROOT))));
+        return paths;
+    }
+
+    /** An animation file for something other than the player's body seen from outside. */
+    private static boolean forAnotherThing(String lowerPath) {
+        String name = lowerPath.substring(lowerPath.lastIndexOf('/') + 1);
+        return name.equals("arm.animation.json") || name.equals("fp.arm.animation.json") || name.startsWith("arrow")
+                || name.startsWith("trident") || lowerPath.contains("vehicle") || lowerPath.contains("projectile");
+    }
+
+    private static boolean isMainAnimation(String lowerPath) {
+        return lowerPath.endsWith("main.animation.json") || lowerPath.endsWith("/main.json") || lowerPath.equals("main.json");
     }
 
     /**

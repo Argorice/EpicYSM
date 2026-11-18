@@ -19,7 +19,6 @@ import yesman.epicfight.api.animation.Joint;
 import yesman.epicfight.api.client.model.Mesh;
 import yesman.epicfight.api.client.model.MeshPartDefinition;
 import yesman.epicfight.api.client.model.VertexBuilder;
-import yesman.epicfight.api.client.model.transformer.HumanoidModelTransformer.PartTransformer;
 import yesman.epicfight.api.model.Armature;
 import yesman.epicfight.api.utils.math.OpenMatrix4f;
 import yesman.epicfight.client.mesh.HumanoidMesh;
@@ -75,9 +74,16 @@ public final class ModelConverter {
         // draws the item that is really in hand and swings that one, so a
         if (com.argorice.epicysm.client.ysm.WeaponBones.hideOpen()) {
             java.util.Set<String> carried = new java.util.LinkedHashSet<>();
+            Map<String, String> above = new HashMap<>();
 
             for (BedrockGeometry.Bone bone : geometry.bones()) {
-                if (com.argorice.epicysm.client.ysm.WeaponBones.isWeapon(bone.name())) {
+                if (bone.parent() != null) {
+                    above.put(bone.name(), bone.parent());
+                }
+            }
+
+            for (BedrockGeometry.Bone bone : geometry.bones()) {
+                if (com.argorice.epicysm.client.ysm.WeaponBones.isWeapon(bone.name(), above::get)) {
                     carried.add(bone.name());
                 }
             }
@@ -402,7 +408,7 @@ public final class ModelConverter {
         List<String> retargeted = new ArrayList<>();
         List<BakedVertex> vertices = new ArrayList<>();
         Map<MeshPartDefinition, IntList> indices = new HashMap<>();
-        PartTransformer.IndexCounter indexCounter = new PartTransformer.IndexCounter();
+        QuadIndices indexCounter = new QuadIndices();
         Map<String, MeshPartDefinition> partDefinitions = new HashMap<>();
 
         for (BedrockGeometry.Bone bone : geometry.bones()) {
@@ -539,7 +545,7 @@ public final class ModelConverter {
 
     private static void bakeCube(BedrockGeometry.Cube cube, BedrockGeometry.Bone bone, Matrix4f boneMatrix, BedrockGeometry geometry,
                                  int jointId, MeshPartDefinition partDefinition, List<BakedVertex> vertices,
-                                 Map<MeshPartDefinition, IntList> indices, PartTransformer.IndexCounter indexCounter,
+                                 Map<MeshPartDefinition, IntList> indices, QuadIndices indexCounter,
                                  float widthScale, float heightScale) {
         float inflate = (cube.hasInflate() ? cube.inflate() : bone.inflate()) / 16.0F;
         boolean mirror = cube.mirror() == Boolean.TRUE;
@@ -592,7 +598,7 @@ public final class ModelConverter {
                         quadUvs[i][0], quadUvs[i][1], jointId));
             }
 
-            PartTransformer.triangluatePolygon(indices, partDefinition, indexCounter);
+            indexCounter.quad(indices, partDefinition);
         }
     }
 
@@ -724,6 +730,27 @@ public final class ModelConverter {
             "head", "torso", "leftArm", "rightArm", "leftLeg", "rightLeg",
             "hat", "jacket", "leftSleeve", "rightSleeve", "leftPants", "rightPants"
     };
+
+    /**
+     * Turns each baked quad into two triangles the way Epic Fight's own
+     * model transformer does: six corners, each index written three times
+     * (position, uv, normal all share the vertex).
+     */
+    private static final class QuadIndices {
+        private int base;
+
+        void quad(Map<MeshPartDefinition, IntList> indices, MeshPartDefinition part) {
+            IntList list = indices.computeIfAbsent(part, key -> new it.unimi.dsi.fastutil.ints.IntArrayList());
+
+            for (int corner : new int[] { 0, 1, 3, 3, 1, 2 }) {
+                for (int repeat = 0; repeat < 3; repeat++) {
+                    list.add(this.base + corner);
+                }
+            }
+
+            this.base += 4;
+        }
+    }
 
     private static HumanoidMesh buildHumanoidMesh(List<BakedVertex> vertices, Map<MeshPartDefinition, IntList> indices,
                                                   Map<String, MeshPartDefinition> partDefinitions) {

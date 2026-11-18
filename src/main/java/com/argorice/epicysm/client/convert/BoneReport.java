@@ -170,7 +170,10 @@ final class BoneReport {
             fate.add("hand locator");
         }
 
-        if (WeaponBones.isWeapon(bone.name())) {
+        if (WeaponBones.isWeapon(bone.name(), name -> {
+            BedrockGeometry.Bone at = bonesByName.get(name);
+            return at == null ? null : at.parent();
+        })) {
             fate.add("weapon of the model's own");
         }
 

@@ -95,7 +95,7 @@ public final class AvalonWeapons {
                 return false;
             }
 
-            Pose pose = patch.getAnimator() == null ? null : patch.getAnimator().getPose(partialTicks);
+            Pose pose = com.argorice.epicysm.client.ysm.EpicFightPoses.of(patch, partialTicks);
             OpenMatrix4f[] poses = place(armature, pose, drawn, size);
 
             if (poses == null) {

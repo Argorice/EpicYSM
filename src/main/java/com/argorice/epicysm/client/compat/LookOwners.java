@@ -284,10 +284,11 @@ public final class LookOwners {
         }
     }
 
-    public static void forget(UUID player) {
-        ANSWERS.remove(player);
-        SAID.remove(player);
-        HIDDEN.remove(player);
+    /** Forgets the players this holds for: the ones no longer in the world. */
+    public static void forgetIf(java.util.function.Predicate<UUID> gone) {
+        ANSWERS.keySet().removeIf(gone);
+        SAID.keySet().removeIf(gone);
+        HIDDEN.keySet().removeIf(gone);
     }
 
     public static void resetAll() {
