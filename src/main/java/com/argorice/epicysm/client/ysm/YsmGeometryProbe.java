@@ -112,7 +112,7 @@ public final class YsmGeometryProbe {
 
             nodes++;
 
-            if (value instanceof Map<?, ?> map && looksLikeAnimations(map)) {
+            if (value instanceof Map<?, ?> map && YsmLiveSkeleton.readsPlainly(value) && looksLikeAnimations(map)) {
                 found++;
                 describeRegistry(map, report);
             }
@@ -560,7 +560,7 @@ public final class YsmGeometryProbe {
         List<Object> children = new ArrayList<>();
 
         try {
-            if (value instanceof Map<?, ?> map) {
+            if (value instanceof Map<?, ?> map && YsmLiveSkeleton.readsPlainly(value)) {
                 for (Object element : map.values()) {
                     if (children.size() >= 1024) {
                         break;
@@ -572,7 +572,7 @@ public final class YsmGeometryProbe {
                 return children;
             }
 
-            if (value instanceof Collection<?> collection) {
+            if (value instanceof Collection<?> collection && YsmLiveSkeleton.readsPlainly(value)) {
                 for (Object element : collection) {
                     if (children.size() >= 1024) {
                         break;

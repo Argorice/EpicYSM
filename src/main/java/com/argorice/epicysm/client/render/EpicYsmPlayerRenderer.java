@@ -260,7 +260,8 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
                 int modifiedLight = decorated ? Decorations.light(entitypatch, packedLight, partialTicks) : packedLight;
                 int overlay = this.getOverlayCoord(entity, entitypatch, partialTicks);
 
-                mesh.draw(poseStack, drawInto, renderType, modifiedLight, color.x(), color.y(), color.z(), color.w(), overlay, armature, armature.getPoseMatrices());
+                MeshDraw.draw(mesh, drawInto != buffer, poseStack, drawInto, renderType, modifiedLight, color.x(), color.y(), color.z(),
+                        color.w(), overlay, armature, armature.getPoseMatrices());
 
                 if (decorated) {
                     Decorations.overlays(entitypatch, mesh, poseStack, drawInto, modifiedLight, armature, partialTicks);

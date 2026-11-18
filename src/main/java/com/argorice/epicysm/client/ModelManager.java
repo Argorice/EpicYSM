@@ -354,9 +354,15 @@ public final class ModelManager {
             this.yielded.put(player.getUUID(), yield);
 
             if (yield) {
-                EpicYsm.LOGGER.info("Model of player {} cannot be read (encrypted .ysm); leaving it to Yes Steve Model, so"
-                        + " Epic Fight attack animations are not shown for it. Change this in the settings screen (/epicysm config)",
-                        player.getName().getString());
+                if (EpicYsmConfig.skeletonOverlay()) {
+                    EpicYsm.LOGGER.info("Model of player {} cannot be read (encrypted .ysm); Yes Steve Model draws it, and Epic"
+                            + " Fight poses it through Yes Steve Model's own skeleton once that is found. Change this in the"
+                            + " settings screen (/epicysm config)", player.getName().getString());
+                } else {
+                    EpicYsm.LOGGER.info("Model of player {} cannot be read (encrypted .ysm); leaving it to Yes Steve Model, so"
+                            + " Epic Fight attack animations are not shown for it. Change this in the settings screen (/epicysm config)",
+                            player.getName().getString());
+                }
 
                 // Yes Steve Model has this model unpacked in memory in order
                 // to draw it. Write down the shape of those objects once, so
@@ -620,8 +626,9 @@ public final class ModelManager {
         }
     }
 
-    /** model id -> the bone names of its geometry on disk, read once. */
-    private final Map<String, java.util.Set<String>> diskBoneNames = new HashMap<>();
+    /** Sanitized id or display name -> model id, for the probe; made once with the models and kept. */
+    @Nullable
+    private volatile Map<String, String> probeNames;
 
     /**
      * What a model's own files say of its skeleton: every bone's name, the
@@ -829,40 +836,30 @@ public final class ModelManager {
         return new Detection(best.modelId(), best.texturePath());
     }
 
-    /** Bone names of a model's own geometry file, read once and kept. */
+    /**
+     * Bone names of a model's own geometry file: those its shape was read
+     * with, ahead of time. Read again here, they cost a read of the whole
+     * geometry of every model sharing a picture, on the frame a player
+     * changed into one of them.
+     */
     private java.util.Set<String> boneNamesOf(String modelId) {
-        return this.diskBoneNames.computeIfAbsent(modelId, id -> {
-            YsmModelSource source = this.sources().get(id);
-
-            if (source == null) {
-                return java.util.Set.of();
-            }
-
-            java.util.Set<String> names = new java.util.LinkedHashSet<>();
-
-            try {
-                var geometry = source.readMainModel().getAsJsonArray("minecraft:geometry").get(0).getAsJsonObject();
-
-                if (geometry.has("bones")) {
-                    for (var element : geometry.getAsJsonArray("bones")) {
-                        var bone = element.getAsJsonObject();
-
-                        if (bone.has("name")) {
-                            names.add(bone.get("name").getAsString());
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {
-                // A model whose geometry will not parse cannot be told
-                // apart this way; the caller treats that as no answer.
-            }
-
-            return names;
-        });
+        return this.shapeOf(modelId).names();
     }
 
-    /** sanitized id or display name -> model id, for the probe. */
+    /**
+     * Sanitized id or display name -> model id, for the probe. Each name is
+     * in the model's own ysm.json, and reading them all opened every model
+     * there is - a second and more of a frozen game in a large pack, on the
+     * frame a player put on a model none of them is, an encrypted one. They
+     * are read once, with the models ahead of time.
+     */
     private Map<String, String> probeCandidates() {
+        Map<String, String> known = this.probeNames;
+
+        if (known != null) {
+            return known;
+        }
+
         Map<String, String> candidates = new HashMap<>();
 
         for (Map.Entry<String, YsmModelSource> entry : this.sources().entrySet()) {
@@ -876,7 +873,8 @@ public final class ModelManager {
             }
         }
 
-        return candidates;
+        this.probeNames = Map.copyOf(candidates);
+        return this.probeNames;
     }
 
     /**
@@ -976,6 +974,8 @@ public final class ModelManager {
                 for (String id : found.keySet()) {
                     this.shapeOf(id);
                 }
+
+                this.probeCandidates();
                 EpicYsm.LOGGER.info("Read {} model(s) and {} picture(s) of theirs ahead of time, in {} ms, so that the first"
                         + " player drawn in one of them costs no frame", found.size(), pictures,
                         (System.nanoTime() - start) / 1_000_000L);
@@ -1103,7 +1103,7 @@ public final class ModelManager {
         // errors: a reload is the one thing short of a restart that asks
         // for everything to be tried again.
         com.argorice.epicysm.client.ysm.YsmRenderBridge.enable();
-        this.diskBoneNames.clear();
+        this.probeNames = null;
         this.shapes.clear();
         this.saidDrawnBy.clear();
         this.saidFellBack.clear();
