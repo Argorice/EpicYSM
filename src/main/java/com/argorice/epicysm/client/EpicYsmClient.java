@@ -86,11 +86,12 @@ public final class EpicYsmClient {
         // Model is not re-rendered through the overlay either - whoever
         // hides a player from Epic Fight hides it from Yes Steve Model too.
         MinecraftForge.EVENT_BUS.addListener(EventPriority.HIGHEST, (RenderLivingEvent.Pre<?, ?> event) -> {
-            if (!(event.getEntity() instanceof AbstractClientPlayer player)) {
+            if (!(event.getEntity() instanceof AbstractClientPlayer player)
+                    || com.argorice.epicysm.client.ysm.YsmRenderBridge.inside()) {
                 return;
             }
 
-            com.argorice.epicysm.client.compat.PlayerRendererSlot.ensureInFront(player.tickCount);
+            com.argorice.epicysm.client.compat.PlayerRendererSlot.ensureInFront();
 
             if (com.argorice.epicysm.client.compat.LookOwners.hidden(player, event.getRenderer())) {
                 event.setCanceled(true);
@@ -98,13 +99,24 @@ public final class EpicYsmClient {
         });
 
         MinecraftForge.EVENT_BUS.addListener(EventPriority.HIGH, true, (RenderLivingEvent.Pre<?, ?> event) -> {
+            // The event Yes Steve Model posts from inside this mod's own
+            // draw: everything below was answered for the outer one.
+            if (com.argorice.epicysm.client.ysm.YsmRenderBridge.inside()) {
+                return;
+            }
+
             if (!(event.getEntity() instanceof AbstractClientPlayer player)) {
                 maid(event);
                 return;
             }
 
             if (event.isCanceled()) {
-                com.argorice.epicysm.client.compat.LookOwners.hiddenByAnotherMod(player, event.getRenderer());
+                // Drawn through Epic Fight by a mod that does so itself is
+                // drawn, not hidden.
+                if (!com.argorice.epicysm.client.compat.YsmGeoCompat.tookOver(player, event.getRenderer())) {
+                    com.argorice.epicysm.client.compat.LookOwners.hiddenByAnotherMod(player, event.getRenderer());
+                }
+
                 return;
             }
 
@@ -112,9 +124,13 @@ public final class EpicYsmClient {
 
             // Yes Steve Model's own render is no longer entered. Two
             // things were tried there and both are settled: its pose is not
+            // A gun in hand, a bow drawn, an emote, sleep: Yes Steve Model
+            // draws the player as out of battle, and Epic Fight is told not
+            // to (shouldYieldToYsm); nothing to step in between here.
             if (EpicYsmConfig.skeletonOverlay()
                     && !(event.getRenderer() instanceof net.minecraft.client.renderer.entity.player.PlayerRenderer)
-                    && !ModelManager.get().epicFightDraws(player)) {
+                    && !ModelManager.get().epicFightDraws(player)
+                    && !com.argorice.epicysm.client.compat.LeftToYsm.now(player)) {
                 com.argorice.epicysm.client.ysm.YsmRenderBridge.intercept(event, player,
                         textureOf(event.getRenderer(), player), ModelManager.get().shouldYieldToYsm(player));
             }
@@ -159,6 +175,10 @@ public final class EpicYsmClient {
         // through, where a hidden player is refused. Once every mod is in.
         modBus.addListener((net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent event) ->
                 event.enqueueWork(com.argorice.epicysm.client.ysm.YsmRenderGate::install));
+
+        // The model folders are read and their pictures hashed while the
+        // game is still loading, off the render thread.
+        modBus.addListener((net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent event) -> ModelManager.get().warmUp());
     }
 
     /**

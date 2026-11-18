@@ -35,10 +35,20 @@ public final class EpicYsmSettingsScreen extends Screen {
         this.list = new OptionsList(this.minecraft, this.width, this.height, 32, this.height - 32, 25);
 
         this.list.addBig(onOff("overlay", EpicYsmConfig.skeletonOverlay(), EpicYsmConfig::setSkeletonOverlay));
+        this.list.addBig(choice("open_models", EpicYsmConfig.openModels(), EpicYsmConfig::setOpenModels,
+                Codec.STRING.xmap(EpicYsmConfig.OpenModels::parse, EpicYsmConfig.OpenModels::key),
+                v -> Component.translatable("epicysm.settings.open_models." + v.key()),
+                EpicYsmConfig.OpenModels.values()));
         this.list.addBig(choice("items", EpicYsmConfig.epicFightItems(), EpicYsmConfig::setEpicFightItems, Codec.BOOL,
                 v -> Component.translatable(v ? "epicysm.settings.items.epicfight" : "epicysm.settings.items.ysm"),
                 Boolean.TRUE, Boolean.FALSE));
         this.list.addBig(choice("bow", EpicYsmConfig.bowByYsm(), EpicYsmConfig::setBowByYsm, Codec.BOOL,
+                v -> Component.translatable(v ? "epicysm.settings.bow.ysm" : "epicysm.settings.bow.epicfight"),
+                Boolean.TRUE, Boolean.FALSE));
+        this.list.addBig(choice("guns", EpicYsmConfig.gunsByYsm(), EpicYsmConfig::setGunsByYsm, Codec.BOOL,
+                v -> Component.translatable(v ? "epicysm.settings.bow.ysm" : "epicysm.settings.bow.epicfight"),
+                Boolean.TRUE, Boolean.FALSE));
+        this.list.addBig(choice("emotes", EpicYsmConfig.emotesByYsm(), EpicYsmConfig::setEmotesByYsm, Codec.BOOL,
                 v -> Component.translatable(v ? "epicysm.settings.bow.ysm" : "epicysm.settings.bow.epicfight"),
                 Boolean.TRUE, Boolean.FALSE));
         this.list.addBig(onOff("armor", EpicYsmConfig.armorOnModels(), EpicYsmConfig::setArmorOnModels));
@@ -54,6 +64,7 @@ public final class EpicYsmSettingsScreen extends Screen {
                 EpicYsmConfig.Unreadable.values()));
         this.list.addBig(onOff("own_animations", EpicYsmConfig.ownAnimations(), EpicYsmConfig::setOwnAnimations));
         this.list.addBig(onOff("physics", EpicYsmConfig.physics(), EpicYsmConfig::setPhysics));
+        this.list.addBig(onOff("afterimages", EpicYsmConfig.modelAfterimages(), EpicYsmConfig::setModelAfterimages));
         this.list.addBig(onOff("diagnostics", EpicYsmConfig.diagnostics(), EpicYsmConfig::setDiagnostics));
 
         this.addWidget(this.list);

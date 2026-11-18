@@ -35,11 +35,17 @@ public final class YsmRenderBridge {
     private static LivingEntity drawn;
     private static boolean disabled;
     private static boolean saidPutBack;
-    private static int rendersWithoutWindow;
 
-    /** Renders that ended in an exception; a few are forgiven, more are not. */
+    /**
+     * Renders that ended in an exception; a few are forgiven, more are not.
+     * Counted over a short while, not over the session: three bad frames
+     * in ten seconds are a pattern, three in an evening are not, and the
+     * switch they throw stays thrown until the game is restarted.
+     */
     private static int failures;
+    private static long firstFailureMillis;
     private static final int FAILURES_ALLOWED = 3;
+    private static final long FAILURES_WITHIN_MILLIS = 10_000L;
 
     /** The last size a model was measured being drawn at. */
     private static float lastScale;
@@ -49,10 +55,14 @@ public final class YsmRenderBridge {
         return Math.round(value * 1000.0F) / 1000.0F;
     }
 
-    /** Puts the bridge back in play, e.g. after the settings. */
+    /** Whether Yes Steve Model's render is no longer entered at all, after it refused to be. */
+    public static boolean disabled() {
+        return disabled;
+    }
+
+    /** Puts the bridge back in play: /epicysm reload. */
     public static void enable() {
         disabled = false;
-        rendersWithoutWindow = 0;
         failures = 0;
     }
 
@@ -79,6 +89,8 @@ public final class YsmRenderBridge {
 
     /** Said once: the mixin did not take and the fallback carried the draw. */
     public static void notePutBack(LivingEntity entity) {
+        hookCanGetIn = Boolean.TRUE;
+
         if (!saidPutBack) {
             saidPutBack = true;
             EpicYsm.LOGGER.info("Compatibility: inside this mod's own draw of {} through Yes Steve Model, the render event Yes"
@@ -111,9 +123,16 @@ public final class YsmRenderBridge {
             return false;
         }
 
+        // Asked before an overlay is set up for the entity, not after: one
+        // was made for every player that came by, and the throwaway players
+        // Yes Steve Model's own screen shows its models on come by under a
+        // new id each, never to be posed.
+        if (!yieldingToYsm || !com.argorice.epicysm.client.EpicYsmConfig.skeletonOverlay()) {
+            return false;
+        }
+
         YsmSkeletonOverlay overlay = YsmSkeletonOverlay.of(player);
-        boolean poseWanted = yieldingToYsm && com.argorice.epicysm.client.EpicYsmConfig.skeletonOverlay()
-                && overlay.wants(player, texture);
+        boolean poseWanted = overlay.wants(player, texture);
         boolean scaleWanted = false;
 
         if (!poseWanted && !scaleWanted) {
@@ -155,6 +174,12 @@ public final class YsmRenderBridge {
             return true;
         }
 
+        // An afterimage of this body waiting for its picture gets it from
+        // this draw: the body and the items in its hands, kept as they are
+        // drawn, against where the body stands before the animation carries it.
+        MultiBufferSource drawInto = Afterimages.recordInto(player, event.getMultiBufferSource(), event.getPoseStack().last().pose(),
+                event.getPoseStack().last().normal(), texture);
+
         event.getPoseStack().pushPose();
 
         if (carry != null) {
@@ -166,7 +191,7 @@ public final class YsmRenderBridge {
             YsmScaleProbe.get().begin(texture, event.getPoseStack().last().pose());
         }
 
-        Window window = new Window(event.getMultiBufferSource(), player, partialTicks,
+        Window window = new Window(drawInto, player, partialTicks,
                 event.getPoseStack(), poseWanted, scaleWanted, texture);
 
         event.setCanceled(true);
@@ -203,9 +228,17 @@ public final class YsmRenderBridge {
             // that names nobody. Cleared here, the failure is one line in
             // the log and one player drawn by Yes Steve Model alone.
             PoseStacks.unwind(event.getPoseStack(), mark);
+            Afterimages.discard(player);
 
             // Once may be another mod's bad frame; a pattern is this mod's
             // problem, and then it steps aside for the rest of the session.
+            long now = net.minecraft.Util.getMillis();
+
+            if (failures == 0 || now - firstFailureMillis > FAILURES_WITHIN_MILLIS) {
+                failures = 0;
+                firstFailureMillis = now;
+            }
+
             if (++failures >= FAILURES_ALLOWED) {
                 EpicYsm.LOGGER.warn("Yes Steve Model refused to be re-rendered with Epic Fight's pose {} times;"
                         + " leaving its rendering alone from now on", failures, t);
@@ -231,12 +264,12 @@ public final class YsmRenderBridge {
         // it now, on the joints the overlay just posed.
         if (epicFightHoldsItems) {
             try {
-                EpicFightItems.drawAt(player, event.getPoseStack(), event.getMultiBufferSource(),
+                EpicFightItems.drawAt(player, event.getPoseStack(), drawInto,
                         event.getPackedLight(), partialTicks,
                         net.minecraft.world.InteractionHand.MAIN_HAND, window.itemSpaces);
 
                 if (!player.getOffhandItem().isEmpty()) {
-                    EpicFightItems.drawAt(player, event.getPoseStack(), event.getMultiBufferSource(),
+                    EpicFightItems.drawAt(player, event.getPoseStack(), drawInto,
                             event.getPackedLight(), partialTicks,
                             net.minecraft.world.InteractionHand.OFF_HAND, window.itemSpaces);
                 }
@@ -273,19 +306,22 @@ public final class YsmRenderBridge {
         }
 
         if (window.opened) {
-            rendersWithoutWindow = 0;
+            overlay.askedForABuffer();
         } else if (!(player instanceof net.minecraft.world.entity.player.Player)) {
             // A maid drawn without a request from Yes Steve Model is one
             // Touhou Little Maid did not hand over this frame; she says
             // nothing about players.
-        } else if (++rendersWithoutWindow > 60) {
-            disabled = true;
-            EpicYsm.LOGGER.warn("Skeleton overlay: Yes Steve Model draws this player without ever asking for a"
-                    + " render buffer, so there is no moment to place Epic Fight's pose in. Its own animations"
-                    + " are left alone.");
-            YsmSkeletonOverlay.resetAll();
+        } else if (!player.isInvisible() && !player.isSpectator()) {
+            // A body nobody can see asks for no buffer when nothing of it
+            // is drawn, and that says nothing about the bridge. For one
+            // that can be seen it is this body's own matter, not every
+            // player's for the rest of the session, which is what it used
+            // to be: sixty such draws in a row, of whoever was on screen,
+            // and no model was posed again until the game was restarted.
+            overlay.drewWithoutABuffer();
         }
 
+        Afterimages.finish(player);
         return true;
     }
 
@@ -410,7 +446,7 @@ public final class YsmRenderBridge {
             // the mixin that keeps it out not in place - draws into nothing.
             // Its picture of a maid is the add-on's fox with this model's
             // texture on it, which is what this mod is here to replace.
-            if (!(this.player instanceof net.minecraft.world.entity.player.Player) && epicFightDrawing()) {
+            if (!(this.player instanceof net.minecraft.world.entity.player.Player) && hookCanGetIn() && epicFightDrawing()) {
                 return nowhere();
             }
 
@@ -447,7 +483,12 @@ public final class YsmRenderBridge {
             }
 
             VertexConsumer buffer = this.delegate.getBuffer(renderType);
-            boolean watching = (this.scaleWanted || this.root != null || this.poseWanted) && !this.measured;
+
+            // The watcher sits on every vertex of the model and exists for
+            // one line in the log and the scale probe; off their duty it
+            // would only hide the real buffer from whoever draws fast.
+            boolean watching = !this.measured && (this.scaleWanted || this.root != null
+                    || (this.poseWanted && !saidDrawnSize && com.argorice.epicysm.client.Diag.on()));
             return watching ? new FirstVertexWatcher(buffer, this) : buffer;
         }
 
@@ -654,7 +695,7 @@ public final class YsmRenderBridge {
                 return null;
             }
 
-            Pose pose = patch.getAnimator().getPose(partialTicks);
+            Pose pose = EpicFightPoses.of(patch, partialTicks);
             JointTransform root = pose == null ? null : pose.getJointTransformData().get("Root");
 
             if (root == null) {
@@ -695,6 +736,40 @@ public final class YsmRenderBridge {
      * the safety net for the strict check below, and the counter that decides
      * when to fall back to it.
      */
+    private static Boolean hookCanGetIn;
+
+    /**
+     * Whether Epic Fight's render hook can run on the event Yes Steve Model
+     * posts from inside this mod's draw at all: only when the mixin meant
+     * to keep it out is not in place. With the mixin there, the stack is
+     * not walked on every buffer a maid asks for. Looked up once: a mixin
+     * leaves its handler, named after this mod's method, in the class.
+     */
+    private static boolean hookCanGetIn() {
+        if (hookCanGetIn == null) {
+            boolean mixinInPlace = false;
+
+            for (String name : new String[] { "yesman.epicfight.client.events.engine.RenderEngine",
+                    "yesman.epicfight.client.events.engine.RenderEngine$Events" }) {
+                try {
+                    Class<?> target = Class.forName(name, false, YsmRenderBridge.class.getClassLoader());
+
+                    for (java.lang.reflect.Method method : target.getDeclaredMethods()) {
+                        if (method.getName().contains("stayOutOfNestedDraw")) {
+                            mixinInPlace = true;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                    // One of the two is the hook's home on this Epic Fight; the other may not exist.
+                }
+            }
+
+            hookCanGetIn = !mixinInPlace;
+        }
+
+        return hookCanGetIn;
+    }
+
     /** Whether Epic Fight's own renderer is on the stack asking for this buffer. */
     private static boolean epicFightDrawing() {
         try {

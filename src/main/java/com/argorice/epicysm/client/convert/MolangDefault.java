@@ -35,7 +35,7 @@ public final class MolangDefault {
     }
 
     private float ternary() {
-        float condition = or();
+        float condition = coalesce();
         skipWhitespace();
 
         if (peek() == '?') {
@@ -53,6 +53,62 @@ public final class MolangDefault {
         }
 
         return condition;
+    }
+
+    /**
+     * "a ?? b": b when a has never been given a value. Models write their
+     * switches this way - "v.roaming.ribbon ?? 1" is a ribbon worn until
+     * the player takes it off - and in the default state no variable has
+     * been given anything, so a bare variable on the left yields the right.
+     */
+    private float coalesce() {
+        skipWhitespace();
+        int from = this.position;
+        float left = or();
+        boolean unset = isVariable(this.text.substring(from, this.position).trim());
+        skipWhitespace();
+
+        while (peek() == '?' && peekAt(1) == '?') {
+            this.position += 2;
+            skipWhitespace();
+            int next = this.position;
+            float right = or();
+
+            if (unset) {
+                left = right;
+                unset = isVariable(this.text.substring(next, this.position).trim());
+            }
+
+            skipWhitespace();
+        }
+
+        return left;
+    }
+
+    /** A variable and nothing else: v.x, variable.x, t.x - not a query, not a call, not a sum. */
+    private static boolean isVariable(String text) {
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        int dot = lower.indexOf('.');
+
+        if (dot <= 0 || dot == lower.length() - 1) {
+            return false;
+        }
+
+        String scope = lower.substring(0, dot);
+
+        if (!scope.equals("v") && !scope.equals("variable") && !scope.equals("t") && !scope.equals("temp")) {
+            return false;
+        }
+
+        for (int i = dot + 1; i < lower.length(); i++) {
+            char c = lower.charAt(i);
+
+            if (!Character.isLetterOrDigit(c) && c != '_' && c != '.') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private float or() {

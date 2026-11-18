@@ -48,7 +48,17 @@ public final class ModelManager {
     /** How often per-player state is purged of players who left. */
     private static final int CLEANUP_INTERVAL_FRAMES = 600;
 
-    private Map<String, YsmModelSource> sources = null;
+    private volatile Map<String, YsmModelSource> sources = null;
+
+    /**
+     * The scan of the model folders and the hashing of every picture in
+     * them, done ahead on a thread of its own while the game is still
+     * loading. Done on demand instead, it fell on the frame the first
+     * player in a Yes Steve Model model was drawn - every model's pictures
+     * decoded then and there - and on every join after a reload.
+     */
+    @Nullable
+    private volatile Thread warming;
 
     /**
      * Converted models, most recently used last. A converted model owns a
@@ -79,6 +89,34 @@ public final class ModelManager {
     private final Map<java.util.UUID, Detection> probedModels = new HashMap<>();
     /** The texture Yes Steve Model is drawing each player with. */
     private final Map<java.util.UUID, ResourceLocation> foreignTextures = new HashMap<>();
+
+    /**
+     * What each player has chosen in Yes Steve Model, as Yes Steve Model
+     * keeps it on the player, read once a second. A change of model is
+     * otherwise noticed by the texture changing under the renderer, and
+     * Yes Steve Model may put the new model's picture into the very
+     * texture the old one used; then nothing changed as far as the texture
+     * said, and the old model went on being fought in.
+     */
+    private final Map<java.util.UUID, String> selections = new HashMap<>();
+    private final Map<java.util.UUID, Integer> selectionChecked = new HashMap<>();
+    private static final int SELECTION_CHECK_TICKS = 20;
+
+    /** The texture signature each player's overlay was last dropped for: dropped once per change, not once per frame. */
+    private final Map<java.util.UUID, Long> forgottenFor = new HashMap<>();
+
+    /** The texture signature last seen under each player, readable or not. */
+    private final Map<java.util.UUID, Long> seenSignatures = new HashMap<>();
+
+    /**
+     * Game time at which a texture that stayed unreadable is matched
+     * again. A model another player wears may not be on the card for a
+     * while after its texture is first named; given up on for good, a
+     * readable model was fought in through the overlay instead of being
+     * converted.
+     */
+    private final Map<java.util.UUID, Long> matchAgainAt = new HashMap<>();
+    private static final long MATCH_AGAIN_TICKS = 100L;
 
     /**
      * How many frames the live skeleton has been asked for and not found.
@@ -122,12 +160,15 @@ public final class ModelManager {
         }
 
         this.releasePending();
+        this.noteBody(player);
 
         if (renderer instanceof net.minecraft.client.renderer.entity.player.PlayerRenderer) {
             // The vanilla renderer: no other mod owns this player's model.
             this.foreignRendererSeen.remove(player.getUUID());
             return;
         }
+
+        this.watchSelection(player);
 
         if (!(renderer instanceof net.minecraft.client.renderer.entity.LivingEntityRenderer)) {
             return;
@@ -150,6 +191,82 @@ public final class ModelManager {
         }
     }
 
+    /**
+     * Notices a player choosing another model in Yes Steve Model, whatever
+     * the texture under the renderer does, and has the model read again.
+     * The choice is read off the player's own data, which Yes Steve Model
+     * syncs to every client; that is a save of the entity to a tag, so not
+     * every frame.
+     */
+    private void watchSelection(AbstractClientPlayer player) {
+        java.util.UUID id = player.getUUID();
+        Integer checked = this.selectionChecked.get(id);
+
+        // A player who left and came back is a new entity, counting from nought again.
+        if (checked != null && player.tickCount >= checked && player.tickCount - checked < SELECTION_CHECK_TICKS) {
+            return;
+        }
+
+        this.selectionChecked.put(id, player.tickCount);
+        com.argorice.epicysm.client.ysm.YsmSelection.Selection now = com.argorice.epicysm.client.ysm.YsmSelection.of(player);
+        String key = now == null ? "" : now.modelId() + "|" + now.texture() + "|" + now.disabled();
+        String before = this.selections.put(id, key);
+
+        if (before == null || before.equals(key) || key.isEmpty()) {
+            return;
+        }
+
+        com.argorice.epicysm.client.Diag.info("Player {} chose another model in Yes Steve Model ({}, was {}); it is read again",
+                player.getName().getString(), key, before);
+        this.foreignSignatures.remove(id);
+        this.unreadableAttempts.remove(id);
+        this.skeletonAttempts.remove(id);
+        com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(id);
+    }
+
+    /**
+     * The body each player was last seen in. A player who comes back into
+     * view, dies or changes dimension is a new entity counting its ticks
+     * from nought, and the ticks kept for the body before - when Epic Fight
+     * last drew it, when Yes Steve Model did - lie ahead of the new one's.
+     * "Drawn by Epic Fight within the last ten ticks" then held for as long
+     * as the new body took to reach the old one's count, minutes or hours:
+     * a player once fought beside in a converted model, met again in an
+     * encrypted one, was not posed for all that time, whatever model they
+     * changed to. What was kept by the tick goes with the body it was kept
+     * for.
+     */
+    private final Map<java.util.UUID, java.lang.ref.WeakReference<AbstractClientPlayer>> bodies = new HashMap<>();
+
+    private void noteBody(AbstractClientPlayer player) {
+        java.util.UUID id = player.getUUID();
+        java.lang.ref.WeakReference<AbstractClientPlayer> known = this.bodies.get(id);
+
+        if (known != null && known.get() == player) {
+            return;
+        }
+
+        this.bodies.put(id, new java.lang.ref.WeakReference<>(player));
+
+        if (known != null) {
+            this.epicFightDrew.remove(id);
+            this.handedOver.remove(id);
+            this.foreignRendererSeen.remove(id);
+            this.selectionChecked.remove(id);
+
+            // And the skeleton being posed was the old body's: Yes Steve
+            // Model keeps one per entity. Left to be found out - by its
+            // going still, a few hundred draws later - the new body fought
+            // in Yes Steve Model's own animation for its first seconds.
+            com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(id);
+        }
+    }
+
+    /** Whether a tick kept for this player is one of this body's last few. */
+    private static boolean lately(AbstractClientPlayer player, @Nullable Integer tick) {
+        return tick != null && player.tickCount >= tick && player.tickCount - tick <= FOREIGN_RENDERER_MEMORY_TICKS;
+    }
+
     /** Epic Fight has just drawn this player with a converted model. */
     public void noteEpicFightRendered(AbstractClientPlayer player) {
         this.epicFightDrew.put(player.getUUID(), player.tickCount);
@@ -162,9 +279,7 @@ public final class ModelManager {
 
     /** Whether Epic Fight, not Yes Steve Model, is drawing this player. */
     public boolean epicFightDraws(AbstractClientPlayer player) {
-        Integer tick = this.epicFightDrew.get(player.getUUID());
-
-        if (tick != null && player.tickCount - tick <= FOREIGN_RENDERER_MEMORY_TICKS) {
+        if (lately(player, this.epicFightDrew.get(player.getUUID()))) {
             return true;
         }
 
@@ -173,8 +288,7 @@ public final class ModelManager {
         // like the rest, the model came back from a transformation posed
         // by Yes Steve Model alone for half a second before Epic Fight's
         // animation was put on it again.
-        Integer handed = this.handedOver.get(player.getUUID());
-        return handed != null && player.tickCount - handed <= FOREIGN_RENDERER_MEMORY_TICKS
+        return lately(player, this.handedOver.get(player.getUUID()))
                 && com.argorice.epicysm.client.compat.LookOwners.ownsLook(player);
     }
 
@@ -196,7 +310,7 @@ public final class ModelManager {
     private static boolean isRealWorldPlayer(AbstractClientPlayer player) {
         try {
             var level = Minecraft.getInstance().level;
-            return level != null && level.getPlayerByUUID(player.getUUID()) == player;
+            return level != null && level.getEntity(player.getId()) == player;
         } catch (Throwable t) {
             return false;
         }
@@ -209,14 +323,26 @@ public final class ModelManager {
             return false;
         }
 
+        // A gun in hand, a bow drawn, an emote, sleep: the body is Yes
+        // Steve Model's to animate for the moment, as out of battle.
+        if (com.argorice.epicysm.client.compat.LeftToYsm.now(player)) {
+            return true;
+        }
+
+        // A model this mod could convert, left to Yes Steve Model all the
+        // same: its layers are only right when Yes Steve Model draws them.
+        Detection readable = this.drawnByYsm(player) ? this.probedModels.get(player.getUUID()) : null;
+
+        if (readable != null && this.ysmDraws(player, readable)) {
+            return true;
+        }
+
         if (EpicYsmConfig.unreadableModels() == EpicYsmConfig.Unreadable.KEEP_COMBAT) {
             // The player chose Epic Fight animations over the model itself.
             return false;
         }
 
-        Integer seenTick = this.foreignRendererSeen.get(player.getUUID());
-
-        if (seenTick == null || player.tickCount - seenTick > FOREIGN_RENDERER_MEMORY_TICKS) {
+        if (!lately(player, this.foreignRendererSeen.get(player.getUUID()))) {
             this.yielded.remove(player.getUUID());
             return false;
         }
@@ -253,6 +379,10 @@ public final class ModelManager {
 
         this.foreignRendererSeen.keySet().removeIf(uuid -> level.getPlayerByUUID(uuid) == null);
 
+        // Asked about every player drawn, a preview on a screen included,
+        // and kept by id; nothing took an answer out again.
+        com.argorice.epicysm.client.compat.LookOwners.forgetIf(uuid -> level.getPlayerByUUID(uuid) == null);
+
         // An overlay belongs to a player or to a maid; whichever it is, it
         // goes when the entity is no longer in the world.
         Set<java.util.UUID> overlaid = com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.players();
@@ -288,10 +418,34 @@ public final class ModelManager {
         }
 
         this.foreignSignatures.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.saidTexture.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.unreadableAttempts.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.probedModels.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.yielded.keySet().retainAll(this.foreignRendererSeen.keySet());
         this.handedOver.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.epicFightDrew.keySet().retainAll(this.foreignRendererSeen.keySet());
+
+        // The body is forgotten with the rest, not when it is collected: a
+        // player back in the world and not yet looked at would otherwise
+        // be taken for one never seen, and the ticks kept for the body
+        // before would stay.
+        this.bodies.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.selections.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.selectionChecked.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.forgottenFor.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.seenSignatures.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.matchAgainAt.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.saidDrawnBy.keySet().retainAll(this.foreignRendererSeen.keySet());
+        this.saidFellBack.keySet().retainAll(this.foreignRendererSeen.keySet());
+    }
+
+    private static long gameTime() {
+        try {
+            var level = Minecraft.getInstance().level;
+            return level == null ? 0L : level.getGameTime();
+        } catch (Throwable t) {
+            return 0L;
+        }
     }
 
     /**
@@ -324,7 +478,23 @@ public final class ModelManager {
         Long previous = this.foreignSignatures.get(player.getUUID());
 
         if (previous != null && previous == signature) {
-            return;
+            Long again = this.matchAgainAt.get(player.getUUID());
+
+            // Not yet - unless the clock has gone back by more than the
+            // wait itself, which is another world's clock, not this one's.
+            if (again == null || gameTime() < again && again - gameTime() <= MATCH_AGAIN_TICKS) {
+                return;
+            }
+
+            this.matchAgainAt.remove(player.getUUID());
+        }
+
+        // Another texture than the last frame's: its unreadable frames are
+        // counted from nought, not from where the last texture's left off.
+        Long lastSeen = this.seenSignatures.put(player.getUUID(), signature);
+
+        if (lastSeen == null || lastSeen != signature) {
+            this.unreadableAttempts.remove(player.getUUID());
         }
 
         if (!this.unreadableAttempts.containsKey(player.getUUID())) {
@@ -333,11 +503,20 @@ public final class ModelManager {
 
         // Yes Steve Model builds the model afresh when it is selected, so
         // the bone objects found last time belong to the previous copy of
-        com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(player.getUUID());
+        // the model. Dropped once per change of texture: dropped on every
+        // frame the texture stayed unreadable, as it was, the overlay was
+        // built anew each of those frames, a walk of Yes Steve Model's
+        // objects every time.
+        Long forgotten = this.forgottenFor.put(player.getUUID(), signature);
+
+        if (forgotten == null || forgotten != signature) {
+            com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.forget(player.getUUID());
+        }
 
         // Primary signal: the pixels of the texture the foreign renderer
         // draws with, matched against the model textures on disk. This
         // follows YSM's own selection (Alt+Y) exactly.
+        this.awaitWarmUp();
         YsmTextureMatcher.Match match = this.textureMatcher.match(texture, this.sources());
 
         if (!match.readable()) {
@@ -350,11 +529,17 @@ public final class ModelManager {
                 return;
             }
 
+            this.matchAgainAt.put(player.getUUID(), gameTime() + MATCH_AGAIN_TICKS);
             com.argorice.epicysm.client.Diag.info("Foreign texture {} stayed unreadable after {} attempts; keeping the default model",
                     texture, attempts - 1);
         }
 
-        this.unreadableAttempts.remove(player.getUUID());
+        // Still unreadable, the count stays past its limit: the next look,
+        // in a while, is one look and not twenty more.
+        if (match.readable()) {
+            this.unreadableAttempts.remove(player.getUUID());
+        }
+
         Detection detection = match.modelId().isEmpty() ? null : new Detection(match.modelId(), match.texturePath());
 
         // Several models ship the same picture: before walking Yes Steve
@@ -413,9 +598,14 @@ public final class ModelManager {
      * A model plus the exact texture file YSM is showing it with (empty
      * when unknown, in which case the model's default texture is used).
      */
-    private record Detection(String modelId, String texturePath) {
+    private record Detection(String modelId, String texturePath, String key) {
+        Detection(String modelId, String texturePath) {
+            this(modelId, texturePath, texturePath.isEmpty() ? modelId : modelId + "|" + texturePath);
+        }
+
+        /** Built once with the record: it is asked for several times a frame. */
         String cacheKey() {
-            return this.texturePath.isEmpty() ? this.modelId : this.modelId + "|" + this.texturePath;
+            return this.key;
         }
 
         /**
@@ -432,6 +622,134 @@ public final class ModelManager {
 
     /** model id -> the bone names of its geometry on disk, read once. */
     private final Map<String, java.util.Set<String>> diskBoneNames = new HashMap<>();
+
+    /**
+     * What a model's own files say of its skeleton: every bone's name, the
+     * bone above each, and how many of them make up a glowing layer - the
+     * bones Yes Steve Model draws at full brightness, named ysmGlow.
+     */
+    public record Shape(String modelId, java.util.Set<String> names, Map<String, String> above, int glowing) {
+    }
+
+    private static final Shape NO_SHAPE = new Shape("", java.util.Set.of(), Map.of(), 0);
+
+    /** model id -> its shape, read once; also from the thread that reads the models ahead. */
+    private final Map<String, Shape> shapes = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Shape shapeOf(String modelId) {
+        Shape known = this.shapes.get(modelId);
+
+        if (known != null) {
+            return known;
+        }
+
+        Shape shape = NO_SHAPE;
+        YsmModelSource source = this.sources().get(modelId);
+
+        if (source != null) {
+            try {
+                var geometry = source.readMainModel().getAsJsonArray("minecraft:geometry").get(0).getAsJsonObject();
+                java.util.Set<String> names = new java.util.LinkedHashSet<>();
+                Map<String, String> above = new HashMap<>();
+                int glowing = 0;
+
+                if (geometry.has("bones")) {
+                    for (var element : geometry.getAsJsonArray("bones")) {
+                        var bone = element.getAsJsonObject();
+
+                        if (!bone.has("name")) {
+                            continue;
+                        }
+
+                        String name = bone.get("name").getAsString();
+                        names.add(name);
+
+                        if (bone.has("parent")) {
+                            above.put(name, bone.get("parent").getAsString());
+                        }
+
+                        if (name.toLowerCase(java.util.Locale.ROOT).startsWith("ysmglow")) {
+                            glowing++;
+                        }
+                    }
+                }
+
+                shape = new Shape(modelId, java.util.Set.copyOf(names), Map.copyOf(above), glowing);
+            } catch (Throwable ignored) {
+                // A model whose geometry will not parse has no shape to
+                // offer; it is treated as one nothing is known about.
+            }
+        }
+
+        this.shapes.put(modelId, shape);
+        return shape;
+    }
+
+    /**
+     * The shape of the model this player wears as its own files give it,
+     * or null for a model this mod cannot read. Yes Steve Model hands over
+     * only part of a model's tree; the files have all of it.
+     */
+    @Nullable
+    public Shape shapeFor(java.util.UUID player) {
+        Detection detection = this.probedModels.get(player);
+
+        if (detection == null) {
+            return null;
+        }
+
+        Shape shape = this.shapeOf(detection.modelId());
+        return shape.names().isEmpty() ? null : shape;
+    }
+
+    /** The readable model each player was last said to have drawn by Yes Steve Model, and the one said to have fallen back. */
+    private final Map<java.util.UUID, Detection> saidDrawnBy = new HashMap<>();
+    private final Map<java.util.UUID, Detection> saidFellBack = new HashMap<>();
+
+    /**
+     * Whether a model this mod can read is left to Yes Steve Model to draw
+     * in battle, posed by Epic Fight through the model's live skeleton the
+     * way an encrypted model is.
+     *
+     * A converted mesh is the model in the state its files start in: what
+     * the player switched in the model's own menu, the expression on its
+     * face, a layer that glows - none of that is in the mesh. Drawn by Yes
+     * Steve Model, every layer is in the state it is in out of battle.
+     * Should the live skeleton turn out not to be posable, the converted
+     * mesh is what fights after all.
+     */
+    private boolean ysmDraws(AbstractClientPlayer player, Detection detection) {
+        EpicYsmConfig.OpenModels mode = EpicYsmConfig.openModels();
+
+        if (mode == EpicYsmConfig.OpenModels.CONVERTED || !EpicYsmConfig.skeletonOverlay()
+                || com.argorice.epicysm.client.ysm.YsmRenderBridge.disabled()) {
+            return false;
+        }
+
+        int glowing = this.shapeOf(detection.modelId()).glowing();
+
+        if (mode == EpicYsmConfig.OpenModels.AUTO && glowing == 0) {
+            return false;
+        }
+
+        // Asked several times a frame; said once per model a player wears.
+        boolean gaveUp = com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.gaveUpOn(player.getUUID());
+
+        if ((gaveUp ? this.saidFellBack : this.saidDrawnBy).put(player.getUUID(), detection) != detection) {
+            if (gaveUp) {
+                EpicYsm.LOGGER.info("Model '{}' on {} could not be posed through Yes Steve Model's own skeleton, so the"
+                        + " converted mesh fights instead", detection.modelId(), player.getName().getString());
+            } else {
+                EpicYsm.LOGGER.info("Model '{}' on {} is drawn by Yes Steve Model in battle, every layer as it is out of"
+                        + " battle, and posed by Epic Fight the way an encrypted model is ({}). The settings screen"
+                        + " (/epicysm config) has it converted instead", detection.modelId(), player.getName().getString(),
+                        mode == EpicYsmConfig.OpenModels.YSM ? "the settings say so for every readable model"
+                                : "it has a glowing layer of " + glowing + " bone(s), which a converted mesh draws lit like the rest");
+            }
+        }
+
+        return !gaveUp;
+    }
 
     /** The model the player chose, by Yes Steve Model's own record of it, if it is one of those shipping the picture. */
     @Nullable
@@ -561,6 +879,50 @@ public final class ModelManager {
         return candidates;
     }
 
+    /**
+     * The texture to draw this player's converted model with: the one Yes
+     * Steve Model itself draws the player with, when it has one on the
+     * card - the player's own skin on the Steve and Alex models, the
+     * variant picked in its skin screen, a picture it put together itself
+     * - and the model's own texture file otherwise. A converted model is
+     * shared by every player wearing it, so this is the player's, not the
+     * model's.
+     */
+    public ResourceLocation textureFor(AbstractClientPlayer player, ConvertedModel model) {
+        Detection detection = this.probedModels.get(player.getUUID());
+        ResourceLocation drawn = this.foreignTextures.get(player.getUUID());
+
+        // A picture matched to one of the model's own files is that file,
+        // registered already; what Yes Steve Model draws with is taken only
+        // where none of them matched.
+        if (detection == null || !detection.texturePath().isEmpty() || drawn == null || drawn.equals(model.texture())) {
+            return model.texture();
+        }
+
+        try {
+            // Only a texture that is actually on the card: asking the
+            // texture manager for an unknown one would register a blank.
+            if (Minecraft.getInstance().getTextureManager().getTexture(drawn, null) == null) {
+                return model.texture();
+            }
+        } catch (Throwable t) {
+            return model.texture();
+        }
+
+        ResourceLocation before = this.saidTexture.put(player.getUUID(), drawn);
+
+        if (!drawn.equals(before)) {
+            com.argorice.epicysm.client.Diag.info("Model {} on {} is drawn with the texture Yes Steve Model draws it with ({}),"
+                    + " not the model's own file: the player's skin on a Steve or Alex model, or a variant picked in"
+                    + " Yes Steve Model's skin screen", model.id(), player.getName().getString(), drawn);
+        }
+
+        return drawn;
+    }
+
+    /** The texture each player was last said to be drawn with, so the log says it once per change. */
+    private final Map<java.util.UUID, ResourceLocation> saidTexture = new HashMap<>();
+
     /** The converted model to draw the given player with, or null for default rendering. */
     @Nullable
     public ConvertedModel modelFor(AbstractClientPlayer player) {
@@ -568,19 +930,79 @@ public final class ModelManager {
             return null;
         }
 
+        // Only while Yes Steve Model is the one drawing this player. With
+        // its model switched off in Yes Steve Model's own settings the
+        // vanilla renderer draws the player, and the model read off Yes
+        // Steve Model's renderer earlier is no longer the one on screen -
+        // it was still fought in until the next clean-up came round.
+        if (!this.drawnByYsm(player)) {
+            return null;
+        }
+
         // YSM's own selection (Alt+Y) is the single authority: whatever its
         // renderer shows for this player is what fights. If the texture
         Detection detection = this.probedModels.get(player.getUUID());
-        return detection != null ? this.convertedModel(detection, this.foreignTextures.get(player.getUUID())) : null;
+
+        if (detection == null || this.ysmDraws(player, detection)) {
+            return null;
+        }
+
+        return this.convertedModel(detection, this.foreignTextures.get(player.getUUID()));
     }
 
-    public Map<String, YsmModelSource> sources() {
+    /** Whether Yes Steve Model's renderer drew this player within the last few ticks. */
+    public boolean drawnByYsm(AbstractClientPlayer player) {
+        return lately(player, this.foreignRendererSeen.get(player.getUUID()));
+    }
+
+    public synchronized Map<String, YsmModelSource> sources() {
         if (this.sources == null) {
             this.sources = ModelScanner.scan(Minecraft.getInstance().gameDirectory.toPath());
             EpicYsm.LOGGER.info("Found {} plain YSM model(s)", this.sources.size());
         }
 
         return Collections.unmodifiableMap(this.sources);
+    }
+
+    /** Starts reading the models and hashing their pictures ahead of time. */
+    public void warmUp() {
+        this.awaitWarmUp();
+        Thread thread = new Thread(() -> {
+            try {
+                long start = System.nanoTime();
+                Map<String, YsmModelSource> found = this.sources();
+                int pictures = this.textureMatcher.prewarm(found);
+
+                for (String id : found.keySet()) {
+                    this.shapeOf(id);
+                }
+                EpicYsm.LOGGER.info("Read {} model(s) and {} picture(s) of theirs ahead of time, in {} ms, so that the first"
+                        + " player drawn in one of them costs no frame", found.size(), pictures,
+                        (System.nanoTime() - start) / 1_000_000L);
+            } catch (Throwable t) {
+                EpicYsm.LOGGER.warn("Could not read the models ahead of time; they are read when first needed", t);
+            }
+        }, "EpicYSM model scan");
+        thread.setDaemon(true);
+        this.warming = thread;
+        thread.start();
+    }
+
+    /** Waits for the reading ahead to finish, where its results are about to be used. */
+    private void awaitWarmUp() {
+        Thread thread = this.warming;
+
+        if (thread == null || thread == Thread.currentThread()) {
+            return;
+        }
+
+        try {
+            thread.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        this.warming = null;
     }
 
     @Nullable
@@ -657,6 +1079,7 @@ public final class ModelManager {
 
     /** Drops all caches; models are re-scanned and re-converted on next use. */
     public void reload() {
+        this.awaitWarmUp();
         this.releasePending();
 
         for (ConvertedModel model : this.converted.values()) {
@@ -675,8 +1098,17 @@ public final class ModelManager {
         com.argorice.epicysm.client.render.OwnAnimator.get().reset();
         com.argorice.epicysm.client.compat.LookOwners.resetAll();
         com.argorice.epicysm.client.ysm.YsmSkeletonOverlay.resetAll();
+
+        // And the way into Yes Steve Model's render, if it was closed after
+        // errors: a reload is the one thing short of a restart that asks
+        // for everything to be tried again.
+        com.argorice.epicysm.client.ysm.YsmRenderBridge.enable();
         this.diskBoneNames.clear();
+        this.shapes.clear();
+        this.saidDrawnBy.clear();
+        this.saidFellBack.clear();
         this.sources = null;
+        this.warmUp();
     }
 
     /**

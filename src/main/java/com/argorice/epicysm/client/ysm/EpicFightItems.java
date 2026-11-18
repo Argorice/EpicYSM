@@ -324,7 +324,7 @@ public final class EpicFightItems {
             stand.override = joints;
 
             if (patch.getAnimator() != null) {
-                yesman.epicfight.api.animation.Pose pose = patch.getAnimator().getPose(partialTicks);
+                yesman.epicfight.api.animation.Pose pose = EpicFightPoses.of(patch, partialTicks);
 
                 if (pose != null) {
                     stand.setPose(pose);

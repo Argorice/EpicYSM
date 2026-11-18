@@ -11,6 +11,7 @@
     "OBBColliderMixin"
   ],
   "client": [
+    "AbstractClientPlayerPatchMixin",
     "RenderEngineMixin"
   ],
   "injectors": {

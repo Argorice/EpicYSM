@@ -43,17 +43,43 @@ public final class EpicYsmConfig {
         }
     }
 
+    /** Who draws, in battle, a model this mod can read. */
+    public enum OpenModels {
+        /** Yes Steve Model for a model with a glowing layer, the converted mesh for the rest. */
+        AUTO,
+        /** Always the mesh this mod builds out of the model's files. */
+        CONVERTED,
+        /** Always Yes Steve Model, posed by Epic Fight the way an encrypted model is. */
+        YSM;
+
+        public static OpenModels parse(String name) {
+            try {
+                return valueOf(name.toUpperCase(Locale.ROOT));
+            } catch (Exception e) {
+                return AUTO;
+            }
+        }
+
+        public String key() {
+            return this.name().toLowerCase(Locale.ROOT);
+        }
+    }
+
     private static boolean loaded;
 
     private static Unreadable unreadable = Unreadable.KEEP_MODEL;
+    private static OpenModels openModels = OpenModels.AUTO;
     private static boolean skeletonOverlay = true;
     private static boolean epicFightItems = true;
     private static boolean hideWeaponsOpen = true;
     private static boolean hideWeaponsLocked = true;
     private static YsmSkeletonOverlay.Hold hold = YsmSkeletonOverlay.Hold.ALL;
     private static boolean bowByYsm = true;
+    private static boolean gunsByYsm = true;
+    private static boolean emotesByYsm = true;
     private static boolean armorOnModels = false;
     private static boolean physics = false;
+    private static boolean modelAfterimages = true;
     private static boolean ownAnimations = true;
     private static boolean diagnostics = false;
 
@@ -65,6 +91,12 @@ public final class EpicYsmConfig {
     public static Unreadable unreadableModels() {
         ensureLoaded();
         return unreadable;
+    }
+
+    /** Who draws a readable model in battle: this mod's converted mesh, or Yes Steve Model itself. */
+    public static OpenModels openModels() {
+        ensureLoaded();
+        return openModels;
     }
 
     /** Epic Fight animations on encrypted models, through Yes Steve Model's own skeleton. */
@@ -103,6 +135,18 @@ public final class EpicYsmConfig {
         return bowByYsm;
     }
 
+    /** A gun of Timeless and Classics Zero or Superb Warfare in hand leaves the body to Yes Steve Model's own animation. */
+    public static boolean gunsByYsm() {
+        ensureLoaded();
+        return gunsByYsm;
+    }
+
+    /** An emote of Emotecraft leaves the body to Yes Steve Model's own animation. */
+    public static boolean emotesByYsm() {
+        ensureLoaded();
+        return emotesByYsm;
+    }
+
     /** Vanilla and Epic Fight armor drawn over a readable model. Off: the model is shown as it is. */
     public static boolean armorOnModels() {
         ensureLoaded();
@@ -115,6 +159,12 @@ public final class EpicYsmConfig {
         return physics;
     }
 
+    /** Epic Fight's afterimages of a player drawn with the model on screen. Off: Epic Fight's own body. */
+    public static boolean modelAfterimages() {
+        ensureLoaded();
+        return modelAfterimages;
+    }
+
     /** Verbose log lines and description files for every model. */
     public static boolean diagnostics() {
         ensureLoaded();
@@ -125,6 +175,11 @@ public final class EpicYsmConfig {
 
     public static void setUnreadableModels(Unreadable value) {
         unreadable = value;
+        save();
+    }
+
+    public static void setOpenModels(OpenModels value) {
+        openModels = value;
         save();
     }
 
@@ -162,6 +217,16 @@ public final class EpicYsmConfig {
         save();
     }
 
+    public static void setGunsByYsm(boolean value) {
+        gunsByYsm = value;
+        save();
+    }
+
+    public static void setEmotesByYsm(boolean value) {
+        emotesByYsm = value;
+        save();
+    }
+
     public static void setArmorOnModels(boolean value) {
         armorOnModels = value;
         save();
@@ -169,6 +234,11 @@ public final class EpicYsmConfig {
 
     public static void setPhysics(boolean value) {
         physics = value;
+        save();
+    }
+
+    public static void setModelAfterimages(boolean value) {
+        modelAfterimages = value;
         save();
     }
 
@@ -200,13 +270,17 @@ public final class EpicYsmConfig {
 
         if (json != null) {
             unreadable = Unreadable.parse(string(json, "unreadable_models", unreadable.key()));
+            openModels = OpenModels.parse(string(json, "open_models", openModels.key()));
             skeletonOverlay = flag(json, "skeleton_overlay", skeletonOverlay);
             epicFightItems = flag(json, "epic_fight_items", epicFightItems);
             hideWeaponsOpen = flag(json, "hide_model_weapons_open", hideWeaponsOpen);
             hideWeaponsLocked = flag(json, "hide_model_weapons_encrypted", hideWeaponsLocked);
             bowByYsm = flag(json, "bow_by_ysm", bowByYsm);
+            gunsByYsm = flag(json, "guns_by_ysm", gunsByYsm);
+            emotesByYsm = flag(json, "emotes_by_ysm", emotesByYsm);
             armorOnModels = flag(json, "armor_on_models", armorOnModels);
             physics = flag(json, "physics", physics);
+            modelAfterimages = flag(json, "model_afterimages", modelAfterimages);
             ownAnimations = flag(json, "own_animations", ownAnimations);
             diagnostics = flag(json, "diagnostics", diagnostics);
 
@@ -271,14 +345,18 @@ public final class EpicYsmConfig {
         Path path = file();
         JsonObject json = new JsonObject();
         json.addProperty("unreadable_models", unreadable.key());
+        json.addProperty("open_models", openModels.key());
         json.addProperty("skeleton_overlay", skeletonOverlay);
         json.addProperty("epic_fight_items", epicFightItems);
         json.addProperty("hide_model_weapons_open", hideWeaponsOpen);
         json.addProperty("hide_model_weapons_encrypted", hideWeaponsLocked);
         json.addProperty("hold", hold.name().toLowerCase(Locale.ROOT));
         json.addProperty("bow_by_ysm", bowByYsm);
+        json.addProperty("guns_by_ysm", gunsByYsm);
+        json.addProperty("emotes_by_ysm", emotesByYsm);
         json.addProperty("armor_on_models", armorOnModels);
         json.addProperty("physics", physics);
+        json.addProperty("model_afterimages", modelAfterimages);
         json.addProperty("own_animations", ownAnimations);
         json.addProperty("diagnostics", diagnostics);
 

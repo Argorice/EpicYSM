@@ -55,9 +55,13 @@ public final class YsmLiveSkeleton {
      *                every model Yes Steve Model has loaded gives itself
      *                away: one rig has one LeftArm, a bag has a dozen
      */
-    public record Skeleton(List<LiveBone> bones, List<Object> objects, Object owner, int repeats) {
+    public record Skeleton(List<LiveBone> bones, List<Object> objects, Object owner, int repeats, Set<String> listed) {
         public Skeleton(List<LiveBone> bones, List<Object> objects, Object owner) {
-            this(bones, objects, owner, 0);
+            this(bones, objects, owner, 0, Set.of());
+        }
+
+        public Skeleton(List<LiveBone> bones, List<Object> objects, Object owner, int repeats) {
+            this(bones, objects, owner, repeats, Set.of());
         }
 
         /**
@@ -679,6 +683,17 @@ public final class YsmLiveSkeleton {
                     continue;
                 }
 
+                // Bones every one, and as many as the look takes: then there
+                // are more. The look stops at a thousand, enough to tell what
+                // a collection holds and not enough to hold a large model.
+                // One of seventeen hundred bones came out a thousand strong,
+                // a different thousand every time the game was started, and
+                // what was left out - a thigh, a head, a hand's locator -
+                // was neither posed nor held.
+                if (elements.size() >= PEEK) {
+                    bones = everyBoneOf(held);
+                }
+
                 // A List is one root-to-leaf chain; the Map is every bone.
                 if (held instanceof Map<?, ?>) {
                     for (Object bone : bones) {
@@ -717,6 +732,9 @@ public final class YsmLiveSkeleton {
         List<LiveBone> bones = new ArrayList<>();
         List<Object> objects = new ArrayList<>();
         Map<String, Boolean> used = new LinkedHashMap<>();
+        // The bones whose bone above is Yes Steve Model's own word, not a
+        // guess from the name.
+        Set<String> listed = new HashSet<>();
         int repeats = 0;
         for (Object bone : ordered) {
             String name = names.get(bone);
@@ -735,12 +753,16 @@ public final class YsmLiveSkeleton {
             bones.add(new LiveBone(name, pivot[0], pivot[1], pivot[2],
                     parent == null ? null : names.get(parent)));
             objects.add(bone);
+
+            if (parent != null && names.get(parent) != null) {
+                listed.add(name);
+            }
         }
 
         List<LiveBone> whole = fillParents(bones, repeats);
 
         return whole.size() < MIN_BONES ? null
-                : new Skeleton(List.copyOf(whole), List.copyOf(objects), model, repeats);
+                : new Skeleton(List.copyOf(whole), List.copyOf(objects), model, repeats, Set.copyOf(listed));
     }
 
     /** Which bone a named bone hangs from, when Yes Steve Model does not say. */
@@ -772,12 +794,13 @@ public final class YsmLiveSkeleton {
         KNOWN_PARENTS.put("righthandlocator", new String[] { "righthand", "rightforearm" });
         KNOWN_PARENTS.put("allhead", new String[] { "upperbody", "mupperbody", "upbody" });
         KNOWN_PARENTS.put("mhead", new String[] { "allhead" });
-        KNOWN_PARENTS.put("head", new String[] { "mhead", "allhead" });
-        KNOWN_PARENTS.put("hair", new String[] { "head", "mhead", "allhead" });
-        KNOWN_PARENTS.put("face", new String[] { "head", "mhead", "allhead" });
+        KNOWN_PARENTS.put("hhead", new String[] { "allhead", "upperbody", "mupperbody", "upbody" });
+        KNOWN_PARENTS.put("head", new String[] { "mhead", "hhead", "allhead" });
+        KNOWN_PARENTS.put("hair", new String[] { "head", "mhead", "hhead", "allhead" });
+        KNOWN_PARENTS.put("face", new String[] { "head", "mhead", "hhead", "allhead" });
         KNOWN_PARENTS.put("leg", new String[] { "downbody", "allbody" });
-        KNOWN_PARENTS.put("leftleg", new String[] { "leg", "downbody", "allbody" });
-        KNOWN_PARENTS.put("rightleg", new String[] { "leg", "downbody", "allbody" });
+        KNOWN_PARENTS.put("leftleg", new String[] { "leg", "downbody", "allbody", "mallbody", "root" });
+        KNOWN_PARENTS.put("rightleg", new String[] { "leg", "downbody", "allbody", "mallbody", "root" });
         KNOWN_PARENTS.put("leftlowerleg", new String[] { "leftleg" });
         KNOWN_PARENTS.put("rightlowerleg", new String[] { "rightleg" });
         KNOWN_PARENTS.put("leftfoot", new String[] { "leftlowerleg", "leftleg" });
@@ -863,13 +886,43 @@ public final class YsmLiveSkeleton {
     }
 
     /** Map values or collection elements; nothing else is a bone holder. */
+    /** How much of a collection is looked at to see what it holds. */
+    private static final int PEEK = 1024;
+
+    /** More bones than any model has; a collection is not read past it. */
+    private static final int MOST_BONES = 65536;
+
+    /** Every bone of a collection already seen to hold nothing else. */
+    private static List<Object> everyBoneOf(@Nullable Object held) {
+        List<Object> bones = new ArrayList<>();
+
+        try {
+            Collection<?> all = held instanceof Map<?, ?> map ? map.values()
+                    : held instanceof Collection<?> collection ? collection : List.of();
+
+            for (Object element : all) {
+                if (bones.size() >= MOST_BONES) {
+                    break;
+                }
+
+                if (element != null && isBone(element)) {
+                    bones.add(element);
+                }
+            }
+        } catch (Throwable ignored) {
+            // As far as it could be read.
+        }
+
+        return bones;
+    }
+
     private static List<Object> elementsOf(@Nullable Object held) {
         List<Object> elements = new ArrayList<>();
 
         try {
             if (held instanceof Map<?, ?> map) {
                 for (Object element : map.values()) {
-                    if (elements.size() >= 1024) {
+                    if (elements.size() >= PEEK) {
                         break;
                     }
 
@@ -877,7 +930,7 @@ public final class YsmLiveSkeleton {
                 }
             } else if (held instanceof Collection<?> collection) {
                 for (Object element : collection) {
-                    if (elements.size() >= 1024) {
+                    if (elements.size() >= PEEK) {
                         break;
                     }
 

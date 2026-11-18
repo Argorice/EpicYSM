@@ -74,9 +74,16 @@ public final class ModelConverter {
         // draws the item that is really in hand and swings that one, so a
         if (com.argorice.epicysm.client.ysm.WeaponBones.hideOpen()) {
             java.util.Set<String> carried = new java.util.LinkedHashSet<>();
+            Map<String, String> above = new HashMap<>();
 
             for (BedrockGeometry.Bone bone : geometry.bones()) {
-                if (com.argorice.epicysm.client.ysm.WeaponBones.isWeapon(bone.name())) {
+                if (bone.parent() != null) {
+                    above.put(bone.name(), bone.parent());
+                }
+            }
+
+            for (BedrockGeometry.Bone bone : geometry.bones()) {
+                if (com.argorice.epicysm.client.ysm.WeaponBones.isWeapon(bone.name(), above::get)) {
                     carried.add(bone.name());
                 }
             }

@@ -18,14 +18,15 @@ public final class AnimationHiddenBones {
 
     /** Bone names hidden by the always-playing animations of the model. */
     public static Set<String> collect(List<JsonObject> animationFiles, List<JsonObject> controllerFiles) {
-        // All animations by name, wherever they are defined.
+        // All animations by name, the first file's where two name one alike:
+        // the files come main file first.
         Map<String, JsonObject> animations = new HashMap<>();
 
         for (JsonObject file : animationFiles) {
             if (file.has("animations") && file.get("animations").isJsonObject()) {
                 for (Map.Entry<String, JsonElement> entry : file.getAsJsonObject("animations").entrySet()) {
                     if (entry.getValue().isJsonObject()) {
-                        animations.put(entry.getKey(), entry.getValue().getAsJsonObject());
+                        animations.putIfAbsent(entry.getKey(), entry.getValue().getAsJsonObject());
                     }
                 }
             }

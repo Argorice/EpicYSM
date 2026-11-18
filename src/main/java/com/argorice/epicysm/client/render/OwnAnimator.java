@@ -127,7 +127,12 @@ public final class OwnAnimator {
         State state = this.states.computeIfAbsent(entity.getUUID(), key -> new State());
         float time = (entity.tickCount + partialTicks) / 20.0F;
 
-        if (!model.id().equals(state.modelId)) {
+        // Another model - or another body: a player who died, changed
+        // dimension or came back into view counts the ticks from nought,
+        // and a clip timed on the body before had not begun yet by that
+        // count. It stood on its first frame until the player did
+        // something else.
+        if (!model.id().equals(state.modelId) || !Float.isNaN(state.lastTime) && time < state.lastTime - 1.0F) {
             state.modelId = model.id();
             state.clip = null;
             state.previous = null;

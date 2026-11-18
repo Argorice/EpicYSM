@@ -7,7 +7,6 @@ import org.joml.Vector4f;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.HumanoidModel;
 import net.minecraft.client.player.AbstractClientPlayer;
-import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.entity.EntityRendererProvider;
@@ -34,7 +33,6 @@ import yesman.epicfight.api.client.model.Meshes;
 import yesman.epicfight.api.animation.Joint;
 import yesman.epicfight.api.model.Armature;
 import yesman.epicfight.api.utils.math.OpenMatrix4f;
-import yesman.epicfight.api.utils.math.Vec2i;
 import yesman.epicfight.client.mesh.HumanoidMesh;
 import yesman.epicfight.client.renderer.patched.entity.PatchedLivingEntityRenderer;
 import yesman.epicfight.client.renderer.patched.layer.PatchedArrowLayer;
@@ -45,8 +43,6 @@ import yesman.epicfight.client.renderer.patched.layer.PatchedHeadLayer;
 import yesman.epicfight.client.renderer.patched.layer.PatchedItemInHandLayer;
 import yesman.epicfight.client.renderer.patched.layer.WearableItemLayer;
 import yesman.epicfight.client.world.capabilites.entitypatch.player.AbstractClientPlayerPatch;
-import yesman.epicfight.mixin.client.MixinEntityRenderer;
-import yesman.epicfight.mixin.client.MixinLivingEntityRenderer;
 
 import com.argorice.epicysm.EpicYsm;
 import com.argorice.epicysm.client.ModelManager;
@@ -145,9 +141,10 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         this.drawingConverted = model != null;
 
         // Not this mod's player right now: another mod owns the look (a
-        // transformation), or the player has no Yes Steve Model and a mod
-        // with a player renderer of its own was here first. Whoever held
-        // the slot before draws.
+        // transformation), or Yes Steve Model is not drawing the player -
+        // no model, or the model switched off in its settings. Whoever held
+        // the slot before draws: Epic Fight's own renderer, with whatever
+        // other mods have added to it, or another mod's.
         if (this.handOver(entity, model)) {
             yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer previous = this.previous();
 
@@ -170,23 +167,20 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         // Nameplate, identical to PatchedEntityRenderer.render.
         RenderNameTagEvent nameTagEvent = new RenderNameTagEvent(entity, entity.getDisplayName(), renderer, poseStack, buffer, packedLight, partialTicks);
         MinecraftForge.EVENT_BUS.post(nameTagEvent);
-        MixinEntityRenderer entityRendererAccessor = (MixinEntityRenderer) renderer;
-
         if (nameTagEvent.getResult() == net.minecraftforge.eventbus.api.Event.Result.ALLOW
-                || nameTagEvent.getResult() != net.minecraftforge.eventbus.api.Event.Result.DENY && entityRendererAccessor.invokeShouldShowName(entity)) {
-            entityRendererAccessor.invokeRenderNameTag(entity, nameTagEvent.getContent(), poseStack, buffer, packedLight);
+                || nameTagEvent.getResult() != net.minecraftforge.eventbus.api.Event.Result.DENY && RendererAccess.shouldShowName(renderer, entity)) {
+            RendererAccess.renderNameTag(renderer, entity, nameTagEvent.getContent(), poseStack, buffer, packedLight);
         }
 
-        MixinLivingEntityRenderer livingRendererAccessor = (MixinLivingEntityRenderer) renderer;
-        boolean isVisible = livingRendererAccessor.invokeIsBodyVisible(entity);
+        boolean isVisible = RendererAccess.isBodyVisible(renderer, entity);
         boolean isVisibleToPlayer = !isVisible && !entity.isInvisibleTo(Minecraft.getInstance().player);
         boolean isGlowing = Minecraft.getInstance().shouldEntityAppearGlowing(entity);
         RenderType renderType;
 
         if (model != null) {
-            renderType = this.pickRenderType(model, isVisible, isVisibleToPlayer, isGlowing);
+            renderType = this.pickRenderType(model, ModelManager.get().textureFor(entity, model), isVisible, isVisibleToPlayer, isGlowing);
         } else if (rendererObject instanceof PlayerRenderer) {
-            renderType = livingRendererAccessor.invokeGetRenderType(entity, isVisible, isVisibleToPlayer, isGlowing);
+            renderType = RendererAccess.renderType(renderer, entity, isVisible, isVisibleToPlayer, isGlowing);
         } else {
             // Falling back to the biped mesh while a foreign renderer (YSM)
             // owns the player: that renderer's getRenderType would return the
@@ -195,6 +189,11 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
 
         Armature armature = model != null ? model.armature() : entitypatch.getArmature();
         boolean lying = model != null && entity.isSleeping();
+
+        // An afterimage of this body waiting for its picture gets it from
+        // this draw, kept as the body is drawn.
+        MultiBufferSource drawInto = model == null ? buffer : com.argorice.epicysm.client.ysm.Afterimages.recordInto(entity, buffer,
+                poseStack.last().pose(), poseStack.last().normal(), ModelManager.get().textureFor(entity, model));
         poseStack.pushPose();
 
         // Epic Fight's sleeping pose is written for its own biped: it turns
@@ -248,27 +247,24 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         if (renderType != null) {
             HumanoidMesh mesh = model != null ? model.mesh() : this.getMeshProvider(entitypatch).get();
             this.prepareMeshParts(mesh, entity);
-            PrepareModelEvent prepareModelEvent = new PrepareModelEvent(this, mesh, entitypatch, buffer, poseStack, packedLight, partialTicks);
+            PrepareModelEvent prepareModelEvent = new PrepareModelEvent(this, mesh, entitypatch, drawInto, poseStack, packedLight, partialTicks);
 
             if (!MinecraftForge.EVENT_BUS.post(prepareModelEvent)) {
                 Vector4f color = new Vector4f(1.0F, 1.0F, 1.0F, isVisibleToPlayer ? 0.15F : 1.0F);
-                entitypatch.getEntityDecorations().modifyColor(color, partialTicks);
+                boolean decorated = com.argorice.epicysm.client.compat.EpicFightApi.decorations();
 
-                int blockLight = (packedLight & 0xF0) >> 4;
-                int skyLight = (packedLight & 0xF00000) >> 20;
-                Vec2i lightUv = new Vec2i(blockLight, skyLight);
-                entitypatch.getEntityDecorations().modifyLight(lightUv, partialTicks);
-                int modifiedLight = LightTexture.pack(lightUv.x, lightUv.y);
+                if (decorated) {
+                    Decorations.color(entitypatch, color, partialTicks);
+                }
+
+                int modifiedLight = decorated ? Decorations.light(entitypatch, packedLight, partialTicks) : packedLight;
                 int overlay = this.getOverlayCoord(entity, entitypatch, partialTicks);
 
-                mesh.draw(poseStack, buffer, renderType, modifiedLight, color.x(), color.y(), color.z(), color.w(), overlay, armature, armature.getPoseMatrices());
+                mesh.draw(poseStack, drawInto, renderType, modifiedLight, color.x(), color.y(), color.z(), color.w(), overlay, armature, armature.getPoseMatrices());
 
-                entitypatch.getEntityDecorations().listDecorationOverlays().forEach(decorationOverlay -> {
-                    if (decorationOverlay.shouldRender()) {
-                        Vector4f overlayColor = decorationOverlay.color(partialTicks);
-                        mesh.draw(poseStack, buffer, decorationOverlay.getRenderType(), modifiedLight, overlayColor.x(), overlayColor.y(), overlayColor.z(), overlayColor.w(), OverlayTexture.NO_OVERLAY, armature, armature.getPoseMatrices());
-                    }
-                });
+                if (decorated) {
+                    Decorations.overlays(entitypatch, mesh, poseStack, drawInto, modifiedLight, armature, partialTicks);
+                }
             }
         }
 
@@ -277,7 +273,7 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
             // drawn by Epic Fight, with Epic Fight's layers, exactly as it
             reportItemLayer(vanillaRenderer, renderer, armature);
             this.renderLayer(vanillaRenderer != null ? castRenderer(vanillaRenderer) : renderer,
-                    entitypatch, entity, armature.getPoseMatrices(), buffer, poseStack, packedLight, partialTicks);
+                    entitypatch, entity, armature.getPoseMatrices(), drawInto, poseStack, packedLight, partialTicks);
         }
 
         if (renderType != null && Minecraft.getInstance().getEntityRenderDispatcher().shouldRenderHitBoxes()) {
@@ -285,6 +281,32 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         }
 
         poseStack.popPose();
+        com.argorice.epicysm.client.ysm.Afterimages.finish(entity);
+    }
+
+    /**
+     * Epic Fight draws a vanilla layer it has no counterpart for through the
+     * vanilla body, hung on the root joint. On a converted model that body
+     * is not the one on screen, so Wildfire's Female Gender Mod's chest came
+     * out beside the model; that layer is set aside while a converted model
+     * is drawn. A player drawn with Epic Fight's own body keeps it.
+     */
+    @Override
+    protected void renderLayer(LivingEntityRenderer<AbstractClientPlayer, HumanoidModel<AbstractClientPlayer>> renderer,
+                               AbstractClientPlayerPatch<AbstractClientPlayer> entitypatch, AbstractClientPlayer entity,
+                               OpenMatrix4f[] poses, MultiBufferSource buffer, PoseStack poseStack, int packedLight, float partialTicks) {
+        if (!this.drawingConverted) {
+            super.renderLayer(renderer, entitypatch, entity, poses, buffer, poseStack, packedLight, partialTicks);
+            return;
+        }
+
+        var aside = com.argorice.epicysm.client.compat.FemaleGenderMod.setAside(this.patchedLayers);
+
+        try {
+            super.renderLayer(renderer, entitypatch, entity, poses, buffer, poseStack, packedLight, partialTicks);
+        } finally {
+            com.argorice.epicysm.client.compat.FemaleGenderMod.restore(this.patchedLayers, aside);
+        }
     }
 
     private boolean handOver(AbstractClientPlayer entity, @javax.annotation.Nullable ConvertedModel model) {
@@ -292,7 +314,18 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
             return true;
         }
 
-        return model == null && this.previousIsForeign() && !ModelManager.get().shouldYieldToYsm(entity);
+        // No converted model and nothing to leave to Yes Steve Model: a
+        // player Yes Steve Model is not drawing. Epic Fight's own renderer
+        // used to be passed over here and this renderer's copy of it drew
+        // the player instead - without whatever other mods had put into
+        // Epic Fight's (Gender Mod Epic Fight Compat hangs its chest there).
+        if (model != null || ModelManager.get().shouldYieldToYsm(entity)) {
+            return false;
+        }
+
+        // Unless the renderer behind would bring back the model the player
+        // switched off: then the plain player is drawn here.
+        return !com.argorice.epicysm.client.compat.YsmGeoCompat.drawsModelsSwitchedOff();
     }
 
     /** The renderer that was in the slot before; Epic Fight's own when nothing else was. */
@@ -312,12 +345,6 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         }
 
         return this.previous;
-    }
-
-    /** Whether the renderer before this one belongs to a mod other than Epic Fight. */
-    private boolean previousIsForeign() {
-        yesman.epicfight.client.renderer.patched.entity.PatchedEntityRenderer previous = this.previous();
-        return previous != null && !previous.getClass().getName().startsWith("yesman.epicfight.");
     }
 
     /**
@@ -608,15 +635,16 @@ public class EpicYsmPlayerRenderer extends PatchedLivingEntityRenderer<
         }
     }
 
-    private RenderType pickRenderType(ConvertedModel model, boolean isVisible, boolean isVisibleToPlayer, boolean isGlowing) {
+    private RenderType pickRenderType(ConvertedModel model, ResourceLocation texture, boolean isVisible, boolean isVisibleToPlayer, boolean isGlowing) {
         // Same visibility semantics as LivingEntityRenderer.getRenderType,
-        // but with the converted model's texture.
+        // but with the converted model's texture - or the one Yes Steve
+        // Model draws this player with, when that is another.
         if (isVisible) {
-            return model.translucent() ? RenderType.entityTranslucent(model.texture()) : RenderType.entityCutoutNoCull(model.texture());
+            return model.translucent() ? RenderType.entityTranslucent(texture) : RenderType.entityCutoutNoCull(texture);
         } else if (isVisibleToPlayer) {
-            return RenderType.itemEntityTranslucentCull(model.texture());
+            return RenderType.itemEntityTranslucentCull(texture);
         } else if (isGlowing) {
-            return RenderType.outline(model.texture());
+            return RenderType.outline(texture);
         }
 
         return null;

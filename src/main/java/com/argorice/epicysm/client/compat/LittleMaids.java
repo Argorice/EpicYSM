@@ -76,10 +76,13 @@ public final class LittleMaids {
                     + " an encrypted model is, instead of by the add-on's own mesh");
         }
 
-        String name = modelIdOf(entity);
+        // One more call into the maid, for a line in the log only.
+        if (com.argorice.epicysm.client.Diag.on()) {
+            String name = modelIdOf(entity);
 
-        if (name != null && saidFor.add(name)) {
-            com.argorice.epicysm.client.Diag.info("Maid {} fights in the Yes Steve Model model '{}'", entity.getName().getString(), name);
+            if (name != null && saidFor.add(name)) {
+                com.argorice.epicysm.client.Diag.info("Maid {} fights in the Yes Steve Model model '{}'", entity.getName().getString(), name);
+            }
         }
 
         return true;

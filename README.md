@@ -15,7 +15,7 @@ Outside of Epic Fight's battle mode nothing changes: YSM keeps doing emotes, idl
 animations exactly as before.
 
 - Minecraft 1.20.1, Forge 47+ (this branch; the `main` branch is 1.21.1 / NeoForge)
-- Requires Epic Fight 20.14+ and Yes Steve Model 2.6+
+- Requires Epic Fight 20.10.2 or later and Yes Steve Model 2 (made and tested with 2.6.5; earlier 2.x is not tested). Afterimages show the model from Epic Fight 20.12 on
 - Client side only. Nothing to install on a server. Every player on screen is posed with
   their own model.
 
@@ -33,6 +33,13 @@ the geometry becomes an Epic Fight mesh, the bones become an Epic Fight skeleton
 model's own proportions. Epic Fight then draws the model itself, so everything it can do -
 weapons, armor, add-on effects, trails - works as on its own models.
 
+A converted mesh is the model in the state its files start in. What a player switched in the
+model's own menu, the expression on its face, a layer that glows are not in it. So a readable
+model can also be left to Yes Steve Model in battle and posed the way an encrypted one is,
+with every layer as it is out of battle; by default that is done for a model with a glowing
+layer (bones named `ysmGlow...`), and the settings choose it for every readable model or for
+none.
+
 **Encrypted models** (`.ysm` files) are never decrypted. Yes Steve Model keeps drawing them;
 this mod reads the skeleton YSM has in memory, works out where every joint of Epic Fight's
 body lands on that skeleton, and writes the pose into the bones a moment before YSM draws.
@@ -44,7 +51,10 @@ Things that happen on their own:
 - The model's own props that only show in special animations stay hidden.
 - Swords, bows, sheaths a model was built with are put away in battle, so only the item
   actually in hand is visible. Names the mod does not recognise can be added to
-  `config/epicysm/hidden-bones.txt`.
+  `config/epicysm/hidden-bones.txt`. A bone called `bow` counts only in a hand: on a dress or
+  a hat it is a ribbon.
+- On a model Yes Steve Model draws in battle the face, and the place of every bone that is
+  not part of the body, stay Yes Steve Model's: that is how a model switches its layers.
 - Models with two bodies (a big and a small one, a human and a beast) are posed on whatever
   body is on screen, and the other one is left alone. When the model turns into something
   that is not a person, the mod steps back until it turns back.
@@ -72,13 +82,15 @@ or `/epicysm config` in chat.
 | Setting | What it does |
 |---|---|
 | Epic Fight animations on encrypted models | The whole encrypted-model half of the mod. Off: encrypted models fight with YSM's animations. |
+| Readable models in battle | Who draws a readable model while Epic Fight poses it: the converted mesh, Yes Steve Model itself (every layer as out of battle), or automatically - Yes Steve Model for a model with a glowing layer. |
 | Held items on encrypted models | Whether Epic Fight or Yes Steve Model draws the weapon in hand. |
 | Drawing a bow (use key) | YSM's animation or Epic Fight's while the use key is held on a bow. |
 | Armor on readable models | Draw worn armor over a converted model. Off by default, so the model looks the way its author made it. |
 | Hide the model's own weapons | For encrypted and for readable models separately. |
-| Model's own animations in battle | How much of YSM's animation keeps playing under Epic Fight's. "Stop everywhere" behaves like a converted model. |
+| Model's own animations in battle | For a model Yes Steve Model draws in battle: how much of its own animation keeps playing under Epic Fight's. "Stop everywhere" behaves like a converted model; "Stop on the body" leaves everything but the body to YSM. |
 | Encrypted model, animations off | With the first setting off: keep the model, or keep Epic Fight's animations on a plain body. |
 | Hair and cloth physics | Secondary motion on readable models. Off by default. |
+| Afterimages of the model | Epic Fight's afterimages (a dodge, a step, adrenaline, Epic Fight Nightfall's trails) show the model. On by default; a long trail shows fewer afterimages of a model at once than of Epic Fight's own body. Off: Epic Fight's own body. |
 | Diagnostics in the log | Detailed log lines and a description of every model in `config/epicysm/bones/`. Turn on when reporting a problem. |
 
 Commands: `/epicysm list` shows the readable models that were found, `/epicysm reload`

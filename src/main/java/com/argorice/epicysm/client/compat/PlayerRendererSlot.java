@@ -28,7 +28,8 @@ import com.argorice.epicysm.client.render.EpicYsmPlayerRenderer;
 public final class PlayerRendererSlot {
     @Nullable
     private static EntityRendererProvider.Context context;
-    private static int lastCheckTick = Integer.MIN_VALUE;
+    private static long lastCheckMillis = Long.MIN_VALUE;
+    private static final long CHECK_EVERY_MILLIS = 5000L;
     private static boolean gaveUp;
 
     private PlayerRendererSlot() {
@@ -73,12 +74,22 @@ public final class PlayerRendererSlot {
      * players? If another mod's has taken the slot, it is wrapped so that
      * both are drawn through.
      */
-    public static void ensureInFront(int tick) {
-        if (gaveUp || context == null || tick - lastCheckTick < 100) {
+    public static void ensureInFront() {
+        if (gaveUp || context == null) {
             return;
         }
 
-        lastCheckTick = tick;
+        // By the clock on the wall. By a player's own tick, as it was, the
+        // check was timed against whichever player came by last, and after
+        // a death - the count starting from nought again - it did not come
+        // round until the new body had lived as long as the old one.
+        long now = net.minecraft.Util.getMillis();
+
+        if (lastCheckMillis != Long.MIN_VALUE && now - lastCheckMillis < CHECK_EVERY_MILLIS) {
+            return;
+        }
+
+        lastCheckMillis = now;
 
         try {
             var engine = ClientEngine.getInstance().renderEngine;
